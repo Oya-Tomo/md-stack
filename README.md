@@ -1,9 +1,26 @@
 # md-stack
 
-Render the code blocks and KaTeX-syntax math that Claude Code writes in a TUI running in a separate terminal, and copy them with a single key.
-See [docs/SPEC.md](docs/SPEC.md) for the specification.
+A viewer that you open **next to Claude Code**, in another terminal pane or window. Claude Code's terminal cannot render math or make code blocks easy to copy, so md-stack gives Claude Code an **MCP server** to send its answers to, and shows them in a TUI with rendered KaTeX math, syntax-highlighted code, and one-key copying.
 
 https://github.com/user-attachments/assets/c102d69f-7f83-4868-86b4-5fa955818220
+
+## How it works
+
+```
+┌─ terminal 1 ─────────────────┐        ┌─ terminal 2 ─────────────────┐
+│ claude                       │        │ md-stack tui                 │
+│                              │  post  │                              │
+│ > derive the formula         │ ─────> │  x = (-b ± √(b²-4ac)) / 2a   │
+│ → md-stack #3                │  (MCP) │  ╭─ rust ──────────── [2] ─╮ │
+│                              │        │  │ fn solve(...)           │ │
+└──────────────────────────────┘        └──────────────────────────────┘
+```
+
+- The md-stack plugin adds an MCP server (`md-stack mcp`) with a `post` tool to Claude Code. Whenever an answer contains code or math, Claude posts it there and writes only `→ md-stack #N` in its own terminal.
+- The server renders the math with MathJax when the post arrives. If an expression does not render, the post is rejected and Claude is told what to fix.
+- `md-stack tui` follows the Claude Code session you pick and shows each post as it arrives. A `SessionStart` hook (`md-stack hook`) keeps it on the right conversation across `/clear` and `--resume`.
+
+See [docs/SPEC.md](docs/SPEC.md) for the specification.
 
 ## Requirements
 
@@ -30,9 +47,9 @@ To rebuild it, run `(cd mathjax && npm ci && npm run build)`.
 
 ## Usage
 
-1. Run `md-stack tui` in a separate terminal
-2. Start Claude Code; responses containing code or math are posted to md-stack
-3. Select the running Claude Code session in the TUI (selected automatically if there is only one)
+1. Open a terminal pane or window next to the one where you run Claude Code, and run `md-stack tui` there
+2. Start Claude Code as usual; answers containing code or math appear in md-stack
+3. If several Claude Code sessions are running, pick one in the TUI (with only one, it is picked automatically)
 
 | Key | Action |
 |---|---|
