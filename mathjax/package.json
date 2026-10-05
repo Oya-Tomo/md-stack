@@ -1,0 +1,10 @@
+{
+  "private": true,
+  "scripts": {
+    "build": "esbuild entry.js --bundle --format=iife --platform=neutral --minify --outfile=../assets/mathjax.js"
+  },
+  "devDependencies": {
+    "esbuild": "^0.25.0",
+    "mathjax-full": "3.2.2"
+  }
+}

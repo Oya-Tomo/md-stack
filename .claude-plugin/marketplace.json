@@ -1,0 +1,16 @@
+{
+  "name": "md-stack",
+  "owner": {
+    "name": "md-stack"
+  },
+  "metadata": {
+    "description": "md-stack: a terminal viewer for Claude Code's code and math"
+  },
+  "plugins": [
+    {
+      "name": "md-stack",
+      "source": "./plugin",
+      "description": "Send Markdown with code and KaTeX math to the md-stack viewer running in another terminal"
+    }
+  ]
+}

@@ -1,0 +1,18 @@
+{
+  "name": "md-stack",
+  "version": "0.1.0",
+  "description": "Send Markdown with code and KaTeX math to the md-stack viewer running in another terminal",
+  "mcpServers": {
+    "md-stack": {
+      "command": "md-stack",
+      "args": ["mcp"]
+    }
+  },
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [{ "type": "command", "command": "md-stack hook" }]
+      }
+    ]
+  }
+}
