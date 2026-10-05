@@ -105,7 +105,7 @@ impl Store {
 
     pub fn live_processes(&self) -> Result<Vec<ProcessRecord>> {
         let mut records = Vec::new();
-        for path in list_dir(&self.root.join("processes"))? {
+        for path in json_files(&self.root.join("processes"))? {
             if let Some(record) = read_json::<ProcessRecord>(&path)?.filter(ProcessRecord::is_alive)
             {
                 records.push(record);
@@ -117,10 +117,10 @@ impl Store {
 
     pub fn posts(&self, session_id: &str) -> Result<Vec<PostMeta>> {
         let mut posts = Vec::new();
-        for path in list_dir(&self.session_dir(session_id))? {
-            let is_post_meta = path.extension().is_some_and(|e| e == "json")
-                && path.file_stem().is_some_and(|s| s != "session");
-            if is_post_meta && let Some(post) = read_json::<PostMeta>(&path)? {
+        for path in json_files(&self.session_dir(session_id))? {
+            if path.file_stem().is_some_and(|s| s != "session")
+                && let Some(post) = read_json::<PostMeta>(&path)?
+            {
                 posts.push(post);
             }
         }
@@ -197,7 +197,7 @@ impl Store {
     /// Removes records of exited processes and sessions whose transcript no longer exists.
     pub fn collect_garbage(&self) -> Result<()> {
         let mut active_sessions = Vec::new();
-        for path in list_dir(&self.root.join("processes"))? {
+        for path in json_files(&self.root.join("processes"))? {
             match read_json::<ProcessRecord>(&path)? {
                 Some(record) if record.is_alive() => active_sessions.push(record.session_id),
                 _ => ignore_not_found(fs::remove_file(&path), &path)?,
@@ -244,6 +244,13 @@ fn list_dir(dir: &Path) -> Result<Vec<PathBuf>> {
         Err(e) if e.kind() == ErrorKind::NotFound => Ok(Vec::new()),
         Err(e) => Err(e).with_context(|| format!("listing {}", dir.display())),
     }
+}
+
+/// The `.json` files in `dir`, leaving out the temporary files of writes in progress.
+fn json_files(dir: &Path) -> Result<Vec<PathBuf>> {
+    let mut paths = list_dir(dir)?;
+    paths.retain(|path| path.extension().is_some_and(|e| e == "json"));
+    Ok(paths)
 }
 
 fn read_json<T: DeserializeOwned>(path: &Path) -> Result<Option<T>> {
@@ -295,5 +302,18 @@ mod tests {
         };
         assert_eq!(entry.metrics, metrics);
         assert_eq!(serde_json::to_string(&entry).unwrap(), json);
+    }
+
+    #[test]
+    fn json_files_leave_out_writes_in_progress() {
+        let dir = tempfile::tempdir().unwrap();
+        let record = dir.path().join("1.json");
+        fs::write(&record, "{}").unwrap();
+        // What `write_atomic` leaves while it writes.
+        tempfile::NamedTempFile::new_in(dir.path())
+            .unwrap()
+            .keep()
+            .unwrap();
+        assert_eq!(json_files(dir.path()).unwrap(), [record]);
     }
 }

@@ -12,6 +12,8 @@ use ratatui::layout::Size;
 use ratatui_image::picker::cap_parser::QueryStdioOptions;
 use ratatui_image::picker::{Capability, Picker};
 use ratatui_image::protocol::Protocol;
+use ratatui_image::protocol::iterm2::Iterm2;
+use ratatui_image::protocol::sixel::Sixel;
 use ratatui_image::{FontSize, Resize};
 use resvg::{tiny_skia, usvg};
 
@@ -192,13 +194,31 @@ impl Rasterizer {
         // The canvas is opaque, so premultiplied and straight alpha coincide.
         let image =
             RgbaImage::from_raw(width, height, pixmap.take()).context("converting math image")?;
-        self.picker
+        let mut protocol = self
+            .picker
             .new_protocol(
                 DynamicImage::ImageRgba8(image),
                 Size::new(geometry.cols, geometry.rows),
                 Resize::Fit(None),
             )
-            .context("encoding math image")
+            .context("encoding math image")?;
+        leave_cursor_after_first_cell(&mut protocol);
+        Ok(protocol)
+    }
+}
+
+/// Makes an image leave the cursor one column right of where it starts.
+///
+/// An iTerm2 or Sixel image is a sequence printed in the image's first cell, which ratatui's
+/// backend counts as one column: it prints the next changed cell without moving the cursor
+/// there if that cell comes right after. The image leaves the cursor elsewhere, though (where it
+/// started, for iTerm2), so the text after a one-column image overwrites it and the rest of the
+/// row drifts by a column, leaving stray characters behind on later frames. Kitty and
+/// halfblocks images are drawn as ordinary cells and need no fix.
+fn leave_cursor_after_first_cell(protocol: &mut Protocol) {
+    if let Protocol::ITerm2(Iterm2 { data, .. }) | Protocol::Sixel(Sixel { data, .. }) = protocol {
+        // Save the cursor, draw, restore it and step over the first cell.
+        *data = format!("\x1b7{data}\x1b8\x1b[C");
     }
 }
 
