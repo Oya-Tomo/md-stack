@@ -3,6 +3,8 @@
 Render the code blocks and KaTeX-syntax math that Claude Code writes in a TUI running in a separate terminal, and copy them with a single key.
 See [docs/SPEC.md](docs/SPEC.md) for the specification.
 
+![md-stack showing a post with Maxwell's equations and C++ code](assets/snapshot.png)
+
 ## Requirements
 
 - Rust (edition 2024)
