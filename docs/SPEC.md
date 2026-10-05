@@ -211,7 +211,7 @@ At startup the TUI queries the terminal for the cell size in pixels, which is us
 
 ### 6.2 Session selection
 
-- The choices are **running Claude Code processes** (live entries in `processes/`), shown with cwd, pid, time and post count.
+- The choices are **running Claude Code processes** (live entries in `processes/`), shown with cwd, time and post count.
 - The selection screen appears at startup. If exactly one process is running, it is selected automatically.
 - The selection screen can be reopened with a key while viewing.
 - The TUI watches the selected process's `processes/<pid>.json`; when `/clear` or `--resume` changes its `session_id`, it switches to the new conversation automatically.
@@ -219,7 +219,7 @@ At startup the TUI queries the terminal for the cell size in pixels, which is us
 ### 6.3 Layout
 
 ```
- md-stack ~/project pid 712352 [follow]
+ md-stack ~/project [follow]
 #1 The quadratic formula │  The quadratic formula
 #2 Ownership in Rust     │
 #3 Diagonalization       │  For [a≠0], the roots are
@@ -229,28 +229,30 @@ At startup the TUI queries the terminal for the cell size in pixels, which is us
                          │  ╭─ rust ───────────────────────────── [3] ─╮
                          │  │ fn main() { ... }                        │
                          │  ╰──────────────────────────────────────────╯
-s:sessions  J/K:post  j/k:scroll  Tab:block  y:copy  Y:copy post  f:follow  q:quit
+s:sessions  J/K:post  j/k:scroll  Tab:snippet  y:copy  Y:copy post  f:follow/lock  p:list  q:quit
 ```
 
 (`[...]` marks math drawn as images.)
 
-- Left pane: post list (ID and title)
-- Right pane: the selected post, rendered
-- Follow mode (on by default): a new post is shown automatically. Selecting another post by hand turns it off.
+- Header: cwd of the followed Claude Code and the mode, `[follow]` or `[locked]`
+- Post list (ID and title): on the left by default; `p` cycles it through left, bottom and hidden
+- Content pane: the selected post, rendered
+- Follow mode (on by default) opens new posts as they arrive. Lock mode stays on the current post instead. `f` switches between them, and selecting another post by hand switches to lock mode.
 
 ### 6.4 Rendering
 
 - Markdown: headings, emphasis, lists, block quotes, tables, links, rules, code blocks and math
-- Code blocks: drawn in a rounded box with the language and block number on the top edge, with syntax highlighting based on the language tag
+- Code blocks: drawn in a rounded box with the language and snippet number on the top edge, with syntax highlighting based on the language tag
 - Display math: the SVG is rasterized and shown centered as a Sixel image
 - Inline math: the SVG is rasterized and embedded in the text as an image. The TUI wraps text itself, reserving cells for the image width. Images sit on the text baseline; a line grows by the rows an image needs above or below the baseline
 - Rasterized images are cached per cell size and post
 - The background color is queried from the terminal with OSC 11 at startup and decides the image background and the math color (light on dark backgrounds)
 - To avoid stale Sixel images, the whole screen is redrawn whenever scrolling or switching posts moves images
 
-### 6.5 Copyable blocks
+### 6.5 Snippets
 
-Code blocks, display math and inline math are copyable blocks, numbered in document order.
+Code blocks, display math and inline math are *snippets*: copyable pieces, numbered in document order.
+Focusing a snippet scrolls it into view if it is off screen.
 Copying math yields its TeX source (without the `$` delimiters).
 
 ### 6.6 Key bindings
@@ -261,10 +263,11 @@ Copying math yields its TeX source (without the `$` delimiters).
 | `Ctrl+d` / `Ctrl+u` | Scroll half a page |
 | `g` / `G` | Scroll to the top / bottom |
 | `J` / `K`, `]` / `[` | Next / previous post |
-| `Tab` / `Shift+Tab` | Focus the next / previous block |
-| `y` | Copy the focused block |
+| `Tab` / `Shift+Tab` | Focus the next / previous snippet |
+| `y` | Copy the focused snippet |
 | `Y` | Copy the whole post as Markdown |
-| `f` | Toggle follow mode |
+| `f` | Switch between follow and lock mode |
+| `p` | Move the post list: left → bottom → hidden |
 | `s` | Open the session selection screen |
 | `q` | Quit |
 

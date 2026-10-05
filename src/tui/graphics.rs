@@ -128,7 +128,7 @@ impl Graphics {
     }
 
     /// The encoded image for a math expression, rendering it on first use.
-    pub fn protocol(
+    pub fn math_image(
         &mut self,
         svg_path: &Path,
         entry: &MathEntry,
@@ -143,7 +143,7 @@ impl Graphics {
         match self.cache.entry(key) {
             Entry::Occupied(slot) => Ok(slot.into_mut()),
             Entry::Vacant(slot) => {
-                Ok(slot.insert(self.rasterizer.encode(svg_path, entry, geometry)?))
+                Ok(slot.insert(self.rasterizer.render(svg_path, entry, geometry)?))
             }
         }
     }
@@ -157,30 +157,14 @@ struct Rasterizer {
 }
 
 impl Rasterizer {
-    fn encode(
+    /// Draws the SVG on an opaque canvas exactly covering its cells, centered horizontally and
+    /// with its baseline on the baseline of [`MathGeometry::baseline_row`], and encodes it.
+    fn render(
         &self,
         svg_path: &Path,
         entry: &MathEntry,
         geometry: MathGeometry,
     ) -> Result<Protocol> {
-        let image = self.rasterize(svg_path, entry, geometry)?;
-        self.picker
-            .new_protocol(
-                image,
-                Size::new(geometry.cols, geometry.rows),
-                Resize::Fit(None),
-            )
-            .context("encoding math image")
-    }
-
-    /// Draws the SVG on an opaque canvas exactly covering its cells, centered horizontally and
-    /// with its baseline on the baseline of [`MathGeometry::baseline_row`].
-    fn rasterize(
-        &self,
-        svg_path: &Path,
-        entry: &MathEntry,
-        geometry: MathGeometry,
-    ) -> Result<DynamicImage> {
         let svg = fs::read_to_string(svg_path)
             .with_context(|| format!("reading {}", svg_path.display()))?
             .replace("currentColor", &css_color(self.foreground));
@@ -210,7 +194,13 @@ impl Rasterizer {
         // The canvas is opaque, so premultiplied and straight alpha coincide.
         let image =
             RgbaImage::from_raw(width, height, pixmap.take()).context("converting math image")?;
-        Ok(DynamicImage::ImageRgba8(image))
+        self.picker
+            .new_protocol(
+                DynamicImage::ImageRgba8(image),
+                Size::new(geometry.cols, geometry.rows),
+                Resize::Fit(None),
+            )
+            .context("encoding math image")
     }
 }
 

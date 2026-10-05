@@ -39,8 +39,9 @@ To rebuild it, run `(cd mathjax && npm ci && npm run build)`.
 | `j` / `k`, `Ctrl+d` / `Ctrl+u`, `g` / `G` | Scroll |
 | `J` / `K`, `]` / `[` | Next / previous post |
 | `Tab` / `Shift+Tab` | Select a code block or math expression |
-| `y` / `Y` | Copy the selected block / the whole post |
-| `f` | Toggle following new posts |
+| `y` / `Y` | Copy the selected code block or math expression / the whole post |
+| `f` | Switch between following new posts and locking to the current one |
+| `p` | Move the post list: left → bottom → hidden |
 | `s` | Session selection screen |
 | `q` | Quit |
 

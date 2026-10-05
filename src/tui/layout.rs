@@ -18,18 +18,18 @@ use crate::store::MathEntry;
 /// A laid-out post.
 #[derive(Debug, Default)]
 pub struct Doc {
-    pub lines: Vec<Line>,
-    /// Copyable blocks in document order.
-    pub blocks: Vec<Block>,
+    pub lines: Vec<DocLine>,
+    /// Copyable code blocks and math, in document order.
+    pub snippets: Vec<Snippet>,
 }
 
 /// One visual line. Lines holding math images can be several rows tall.
 #[derive(Debug, Default)]
-pub struct Line {
+pub struct DocLine {
     pub height: u16,
     pub segments: Vec<Segment>,
-    /// Blocks (indices into [`Doc::blocks`]) shown on this line.
-    pub blocks: Vec<usize>,
+    /// Snippets (indices into [`Doc::snippets`]) shown on this line.
+    pub snippets: Vec<usize>,
 }
 
 #[derive(Debug)]
@@ -51,20 +51,20 @@ pub enum SegmentContent {
 }
 
 #[derive(Debug)]
-pub struct Block {
-    pub kind: BlockKind,
+pub struct Snippet {
+    pub kind: SnippetKind,
     /// What is copied: the code, or the TeX source.
     pub text: String,
 }
 
 #[derive(Debug)]
-pub enum BlockKind {
+pub enum SnippetKind {
     Code { lang: String },
     DisplayMath,
     InlineMath,
 }
 
-impl fmt::Display for BlockKind {
+impl fmt::Display for SnippetKind {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Code { lang } if lang.is_empty() => f.write_str("code"),
@@ -90,6 +90,9 @@ pub fn layout(markdown: &str, math: &[MathEntry], ctx: LayoutContext) -> Doc {
     builder.finish()
 }
 
+/// Columns a tab in a code block is expanded to.
+const TAB_WIDTH: usize = 4;
+
 const DIM: Style = Style::new().fg(Color::DarkGray);
 const INLINE_CODE: Style = Style::new().fg(Color::Yellow);
 const LINK: Style = Style::new()
@@ -101,7 +104,7 @@ enum Atom {
     Word(String, Style),
     Space,
     Break,
-    Math { index: usize, block: usize },
+    Math { index: usize, snippet: usize },
 }
 
 /// Something that indents the lines inside it.
@@ -349,20 +352,20 @@ impl Builder {
             table.cell.extend(["$", tex, "$"]);
             return;
         }
-        let block = self.doc.blocks.len();
-        self.doc.blocks.push(Block {
+        let snippet = self.doc.snippets.len();
+        self.doc.snippets.push(Snippet {
             kind: if display {
-                BlockKind::DisplayMath
+                SnippetKind::DisplayMath
             } else {
-                BlockKind::InlineMath
+                SnippetKind::InlineMath
             },
             text: tex.trim().to_owned(),
         });
         if display {
             self.flush_inline();
-            self.display_math(index, block);
+            self.display_math(index, snippet);
         } else {
-            self.inline.push(Atom::Math { index, block });
+            self.inline.push(Atom::Math { index, snippet });
         }
     }
 
@@ -372,7 +375,7 @@ impl Builder {
     fn start_block(&mut self) {
         self.flush_inline();
         if mem::take(&mut self.blank_pending) && !self.doc.lines.is_empty() {
-            self.push_line_with(LineBuilder::default(), false);
+            self.push_blank_line();
         }
     }
 
@@ -386,7 +389,11 @@ impl Builder {
     }
 
     fn content_width(&self) -> u16 {
-        let indent: usize = self.containers.iter().map(Container::width).sum();
+        let indent: usize = self
+            .containers
+            .iter()
+            .map(|c| c.continuation().width())
+            .sum();
         self.ctx.width.saturating_sub(to_cols(indent)).max(1)
     }
 
@@ -396,22 +403,24 @@ impl Builder {
         const FRAME: u16 = 4;
         let width = self.content_width().max(FRAME + 1);
         let inner = width - FRAME;
-        let block = self.doc.blocks.len();
+        let snippet = self.doc.snippets.len();
         let title = if lang.is_empty() {
             String::new()
         } else {
             format!(" {lang} ")
         };
-        let label = format!(" [{}] ", block + 1);
+        let label = format!(" [{}] ", snippet + 1);
 
-        let mut top = LineBuilder::with_block(block);
+        let mut top = LineBuilder::with_snippet(snippet);
         let fill = usize::from(width - FRAME).saturating_sub(title.width() + label.width());
         top.push_text(&format!("╭─{title}{}{label}─╮", "─".repeat(fill)), DIM);
         self.push_line(top);
 
-        for spans in highlight::highlight(&code, &lang, self.ctx.theme) {
+        // Tabs have no display width of their own, so show them as spaces; copying keeps them.
+        let shown = code.replace('\t', &" ".repeat(TAB_WIDTH));
+        for spans in highlight::highlight(&shown, &lang, self.ctx.theme) {
             for chunk in wrap_spans(spans, inner) {
-                let mut line = LineBuilder::with_block(block);
+                let mut line = LineBuilder::with_snippet(snippet);
                 line.push_text("│ ", DIM);
                 for span in chunk {
                     line.push_span(span);
@@ -422,26 +431,26 @@ impl Builder {
             }
         }
 
-        let mut bottom = LineBuilder::with_block(block);
+        let mut bottom = LineBuilder::with_snippet(snippet);
         bottom.push_text(&format!("╰{}╯", "─".repeat(usize::from(width - 2))), DIM);
         self.push_line(bottom);
 
-        self.doc.blocks.push(Block {
-            kind: BlockKind::Code { lang },
+        self.doc.snippets.push(Snippet {
+            kind: SnippetKind::Code { lang },
             text: code,
         });
     }
 
-    fn display_math(&mut self, index: usize, block: usize) {
+    fn display_math(&mut self, index: usize, snippet: usize) {
         let width = self.content_width();
-        let label = format!("[{}]", block + 1);
+        let label = format!("[{}]", snippet + 1);
         let label_width = str_cols(&label);
         let geometry = MathGeometry::fit(
             &self.math[index],
             self.ctx.font,
             width.saturating_sub(2 * (label_width + 1)),
         );
-        let mut line = LineBuilder::with_block(block);
+        let mut line = LineBuilder::with_snippet(snippet);
         line.advance_to(width.saturating_sub(geometry.cols) / 2);
         line.push_math(index, geometry);
         line.advance_to(width.saturating_sub(label_width));
@@ -563,11 +572,11 @@ impl Builder {
                         line.push_text(ch.encode_utf8(&mut [0; 4]), style);
                     }
                 }
-                Atom::Math { index, block } => {
+                Atom::Math { index, snippet } => {
                     let geometry = MathGeometry::fit(&self.math[index], self.ctx.font, width);
                     self.break_or_space(&mut line, &mut space_pending, geometry.cols, width);
                     line.push_math(index, geometry);
-                    line.blocks.push(block);
+                    line.snippets.push(snippet);
                 }
             }
         }
@@ -593,64 +602,70 @@ impl Builder {
 
     // --- Line output ---
 
+    /// Appends a content line. The first line inside a list item shows the item's marker.
     fn push_line(&mut self, line: LineBuilder) {
-        self.push_line_with(line, true);
-    }
-
-    /// Prefixes the line with container indentation and appends it to the document.
-    /// List markers are only consumed by content lines, not by separating blank lines.
-    fn push_line_with(&mut self, line: LineBuilder, show_markers: bool) {
-        let mut prefix = String::new();
+        let mut indent = String::new();
         for container in &mut self.containers {
             match container {
-                Container::Quote => prefix.push_str("│ "),
                 Container::Item {
                     marker,
                     marker_shown,
-                } => {
-                    if show_markers && !*marker_shown {
-                        *marker_shown = true;
-                        prefix.push_str(marker);
-                    } else {
-                        prefix.push_str(&" ".repeat(marker.width()));
-                    }
+                } if !*marker_shown => {
+                    *marker_shown = true;
+                    indent.push_str(marker);
                 }
+                container => indent.push_str(&container.continuation()),
             }
         }
-        let indent = str_cols(&prefix);
-        // Text sits on the baseline row; math images extend above and below it.
+        self.append(indent, line);
+    }
+
+    /// Appends an empty line that separates blocks; it never shows a list marker.
+    fn push_blank_line(&mut self) {
+        let indent = self
+            .containers
+            .iter()
+            .map(Container::continuation)
+            .collect();
+        self.append(indent, LineBuilder::default());
+    }
+
+    /// Appends `line` behind `indent`, placing text on the baseline row and math around it.
+    fn append(&mut self, indent: String, line: LineBuilder) {
+        let indent_width = str_cols(&indent);
         let text_row = line.above;
         let height = line.above + 1 + line.below;
 
         let mut segments = Vec::with_capacity(line.segments.len() + 1);
-        if !prefix.is_empty() {
+        if !indent.is_empty() {
             segments.push(Segment {
                 col: 0,
                 row: text_row,
-                content: SegmentContent::Text(Span::styled(prefix, DIM)),
+                content: SegmentContent::Text(Span::styled(indent, DIM)),
             });
         }
         for mut segment in line.segments {
-            segment.col += indent;
+            segment.col += indent_width;
             segment.row = match &segment.content {
                 SegmentContent::Text(_) => text_row,
                 SegmentContent::Math { geometry, .. } => text_row - geometry.baseline_row,
             };
             segments.push(segment);
         }
-        self.doc.lines.push(Line {
+        self.doc.lines.push(DocLine {
             height,
             segments,
-            blocks: line.blocks,
+            snippets: line.snippets,
         });
     }
 }
 
 impl Container {
-    fn width(&self) -> usize {
+    /// The indentation this container adds to lines that show no list marker.
+    fn continuation(&self) -> String {
         match self {
-            Self::Quote => 2,
-            Self::Item { marker, .. } => marker.width(),
+            Self::Quote => "│ ".to_owned(),
+            Self::Item { marker, .. } => " ".repeat(marker.width()),
         }
     }
 }
@@ -674,13 +689,13 @@ struct LineBuilder {
     above: u16,
     below: u16,
     segments: Vec<Segment>,
-    blocks: Vec<usize>,
+    snippets: Vec<usize>,
 }
 
 impl LineBuilder {
-    fn with_block(block: usize) -> Self {
+    fn with_snippet(snippet: usize) -> Self {
         Self {
-            blocks: vec![block],
+            snippets: vec![snippet],
             ..Self::default()
         }
     }
@@ -795,7 +810,7 @@ mod tests {
         }
     }
 
-    fn text_of(line: &Line) -> String {
+    fn text_of(line: &DocLine) -> String {
         let mut out = String::new();
         for segment in &line.segments {
             let col = usize::from(segment.col);
@@ -851,20 +866,27 @@ mod tests {
                 "╰────────────────────────────╯",
             ]
         );
-        assert_eq!(doc.blocks.len(), 1);
-        assert_eq!(doc.blocks[0].text, "fn main() {}\n");
-        assert!(doc.lines[6..].iter().all(|l| l.blocks == [0]));
+        assert_eq!(doc.snippets.len(), 1);
+        assert_eq!(doc.snippets[0].text, "fn main() {}\n");
+        assert!(doc.lines[6..].iter().all(|l| l.snippets == [0]));
     }
 
     #[test]
-    fn math_becomes_images_and_blocks() {
+    fn code_tabs_are_shown_as_spaces_but_copied_verbatim() {
+        let doc = layout("```\n\tx\n```\n", &[], ctx(20));
+        assert_eq!(text_of(&doc.lines[1]), "│     x            │");
+        assert_eq!(doc.snippets[0].text, "\tx\n");
+    }
+
+    #[test]
+    fn math_becomes_images_and_snippets() {
         let doc = layout("Let $x$ be.\n\n$$y$$", &[math(false), math(true)], ctx(40));
         let lines: Vec<_> = doc.lines.iter().map(text_of).collect();
         assert_eq!(lines[0], "Let MMMMM be.");
         assert!(lines[2].contains("MMMMM") && lines[2].ends_with("[2]"));
-        assert_eq!(doc.blocks.len(), 2);
-        assert!(matches!(doc.blocks[0].kind, BlockKind::InlineMath));
-        assert_eq!(doc.lines[0].blocks, [0]);
+        assert_eq!(doc.snippets.len(), 2);
+        assert!(matches!(doc.snippets[0].kind, SnippetKind::InlineMath));
+        assert_eq!(doc.lines[0].snippets, [0]);
     }
 
     #[test]
