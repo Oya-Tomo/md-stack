@@ -9,7 +9,7 @@ See [docs/SPEC.md](docs/SPEC.md) for the specification.
 
 - Rust (edition 2024)
 - Node.js and npm (only to rebuild the MathJax bundle)
-- A terminal with Sixel and OSC 52 support (e.g. WezTerm)
+- A terminal with a graphics protocol (Kitty, iTerm2 or Sixel) and OSC 52, e.g. WezTerm, kitty, Ghostty or foot
 - Linux
 
 ## Build and install
@@ -43,6 +43,7 @@ To rebuild it, run `(cd mathjax && npm ci && npm run build)`.
 | `f` | Switch between following new posts and locking to the current one |
 | `p` | Move the post list: left → bottom → hidden |
 | `s` | Session selection screen |
+| `Ctrl+L` | Redraw the whole screen |
 | `q` | Quit |
 
 Posts are stored in `$XDG_STATE_HOME/md-stack/` and are removed when Claude Code deletes the conversation's transcript.

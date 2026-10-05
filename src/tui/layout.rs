@@ -3,7 +3,7 @@
 use std::fmt;
 use std::mem;
 
-use pulldown_cmark::{CodeBlockKind, Event, HeadingLevel, Tag, TagEnd};
+use pulldown_cmark::{Event, HeadingLevel, Tag, TagEnd};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::Span;
 use ratatui_image::FontSize;
@@ -12,7 +12,7 @@ use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use super::graphics::MathGeometry;
 use super::highlight;
-use crate::document;
+use crate::document::{self, CodeBlock};
 use crate::store::MathEntry;
 
 /// A laid-out post.
@@ -117,12 +117,6 @@ enum Container {
     },
 }
 
-/// A fenced or indented code block being collected.
-struct CodeBlock {
-    lang: String,
-    text: String,
-}
-
 struct Table {
     rows: Vec<Vec<String>>,
     row: Vec<String>,
@@ -215,16 +209,7 @@ impl Builder {
             }
             Tag::CodeBlock(kind) => {
                 self.start_block();
-                let lang = match kind {
-                    CodeBlockKind::Fenced(info) => {
-                        info.split_whitespace().next().unwrap_or("").to_owned()
-                    }
-                    CodeBlockKind::Indented => String::new(),
-                };
-                self.code = Some(CodeBlock {
-                    lang,
-                    text: String::new(),
-                });
+                self.code = Some(CodeBlock::new(&kind));
             }
             Tag::List(start) => {
                 if self.in_list() {
@@ -331,7 +316,7 @@ impl Builder {
 
     fn text(&mut self, text: &str) {
         if let Some(code) = &mut self.code {
-            code.text.push_str(text);
+            code.code.push_str(text);
         } else if let Some(table) = &mut self.table {
             table.cell.push_str(text);
         } else {
@@ -398,7 +383,7 @@ impl Builder {
     }
 
     /// Draws a code block in a rounded box with its language and block number on the top edge.
-    fn code_block(&mut self, CodeBlock { lang, text: code }: CodeBlock) {
+    fn code_block(&mut self, CodeBlock { lang, code }: CodeBlock) {
         // Border plus one column of padding on each side.
         const FRAME: u16 = 4;
         let width = self.content_width().max(FRAME + 1);
@@ -831,9 +816,11 @@ mod tests {
         MathEntry {
             display,
             tex: "x".into(),
-            width_ex: 5.0,
-            height_ex: 2.0,
-            depth_ex: 0.5,
+            metrics: crate::math::MathMetrics {
+                width: 5.0,
+                height: 2.0,
+                depth: 0.5,
+            },
         }
     }
 

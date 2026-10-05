@@ -3,7 +3,7 @@
 //! Both sides must parse identically so that the n-th math event the TUI sees is the n-th
 //! expression the server rendered.
 
-use pulldown_cmark::{Event, HeadingLevel, Options, Parser, Tag, TagEnd};
+use pulldown_cmark::{CodeBlockKind, Event, HeadingLevel, Options, Parser, Tag, TagEnd};
 
 pub fn parser(markdown: &str) -> Parser<'_> {
     Parser::new_ext(
@@ -39,6 +39,45 @@ pub fn math_sources(markdown: &str) -> Vec<MathSource> {
             })
         })
         .collect()
+}
+
+/// A fenced or indented code block.
+pub struct CodeBlock {
+    /// The first word of a fence's info string (`rust` in ```` ```rust ignore ````), or empty.
+    pub lang: String,
+    pub code: String,
+}
+
+impl CodeBlock {
+    /// An empty block for a code block start tag; its text events are appended to `code`.
+    pub fn new(kind: &CodeBlockKind) -> Self {
+        let lang = match kind {
+            CodeBlockKind::Fenced(info) => info.split_whitespace().next().unwrap_or(""),
+            CodeBlockKind::Indented => "",
+        };
+        Self {
+            lang: lang.to_owned(),
+            code: String::new(),
+        }
+    }
+}
+
+pub fn code_blocks(markdown: &str) -> Vec<CodeBlock> {
+    let mut blocks = Vec::new();
+    let mut current: Option<CodeBlock> = None;
+    for event in parser(markdown) {
+        match event {
+            Event::Start(Tag::CodeBlock(kind)) => current = Some(CodeBlock::new(&kind)),
+            Event::Text(text) => {
+                if let Some(block) = &mut current {
+                    block.code.push_str(&text);
+                }
+            }
+            Event::End(TagEnd::CodeBlock) => blocks.extend(current.take()),
+            _ => {}
+        }
+    }
+    blocks
 }
 
 /// The text of the first top-level heading, or else the first non-empty line.
@@ -91,6 +130,20 @@ mod tests {
         assert_eq!(
             (math[1].tex.trim(), math[1].display, math[1].line),
             ("x^2", true, 5)
+        );
+    }
+
+    #[test]
+    fn finds_code_blocks_with_languages() {
+        let blocks = code_blocks("```rust ignore\nfn f() {}\n```\n\n    indented\n");
+        assert_eq!(blocks.len(), 2);
+        assert_eq!(
+            (blocks[0].lang.as_str(), blocks[0].code.as_str()),
+            ("rust", "fn f() {}\n")
+        );
+        assert_eq!(
+            (blocks[1].lang.as_str(), blocks[1].code.as_str()),
+            ("", "indented\n")
         );
     }
 

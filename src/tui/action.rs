@@ -9,6 +9,8 @@ use super::doc_view::Motion;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Action {
     Quit,
+    /// Repaint the whole screen, in case the terminal shows leftovers.
+    Redraw,
     // Session picker
     NextSession,
     PreviousSession,
@@ -30,6 +32,7 @@ impl Action {
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
         let action = match (screen, key.code) {
             (_, KeyCode::Char('c')) if ctrl => Self::Quit,
+            (_, KeyCode::Char('l')) if ctrl => Self::Redraw,
             (_, KeyCode::Char('q')) => Self::Quit,
 
             (Screen::Sessions, KeyCode::Char('j') | KeyCode::Down) => Self::NextSession,
@@ -94,5 +97,14 @@ mod tests {
             Some(Action::Move(Motion::HalfPageDown))
         );
         assert_eq!(Action::from_key(Screen::Sessions, ctrl_d), None);
+        let ctrl_l = key(KeyCode::Char('l'), KeyModifiers::CONTROL);
+        assert_eq!(
+            Action::from_key(Screen::Sessions, ctrl_l),
+            Some(Action::Redraw)
+        );
+        assert_eq!(
+            Action::from_key(Screen::Posts, ctrl_l),
+            Some(Action::Redraw)
+        );
     }
 }

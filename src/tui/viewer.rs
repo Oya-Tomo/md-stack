@@ -6,6 +6,7 @@ use anyhow::Result;
 use ratatui::widgets::ListState;
 
 use super::doc_view::DocState;
+use super::highlight;
 use super::layout::{self, Doc, LayoutContext};
 use crate::store::{PostMeta, ProcessRecord, Store};
 
@@ -44,10 +45,8 @@ impl Viewer {
         self.posts.get(self.post_list.selected()?)
     }
 
-    /// Re-reads the process record and its posts. Returns whether the shown post changed.
-    ///
-    /// With `follow`, a newly arrived post is shown.
-    pub fn refresh(&mut self, store: &Store, follow: bool) -> Result<bool> {
+    /// Re-reads the process record and its posts. With `follow`, a newly arrived post is shown.
+    pub fn refresh(&mut self, store: &Store, follow: bool) -> Result<()> {
         let record = store.live_process(self.process.claude_pid)?;
         self.alive = record.is_some();
         // `/clear` or a resume switches the conversation shown in that Claude Code.
@@ -58,48 +57,62 @@ impl Viewer {
             self.process = process;
         }
         let posts = store.posts(&self.process.session_id)?;
-        let grew = posts.len() > self.posts.len();
+        let known = if switched { 0 } else { self.posts.len() };
+        let grew = posts.len() > known;
         self.posts = posts;
+        if grew {
+            self.prepare_highlighting(store, known);
+        }
 
         if switched {
             self.post_list = ListState::default();
             self.loaded = None;
         }
-        Ok(if switched || (grew && follow) {
-            self.show_last()
+        if switched || (grew && follow) {
+            self.show_last();
         } else {
             let selected = self.post_list.selected().map(|i| i.min(self.last_index()));
-            self.show(selected)
-        })
+            self.show(selected);
+        }
+        Ok(())
     }
 
-    pub fn show_next(&mut self) -> bool {
+    /// Prepares highlighting for the posts from index `from` on, ahead of showing them.
+    fn prepare_highlighting(&self, store: &Store, from: usize) {
+        let session_id = &self.process.session_id;
+        let markdowns = self.posts[from..]
+            .iter()
+            // A post that cannot be read now reports the error when it is shown.
+            .filter_map(|post| store.post_markdown(session_id, post.id).ok())
+            .collect();
+        highlight::prepare(markdowns);
+    }
+
+    pub fn show_next(&mut self) {
         let next = self.post_list.selected().map_or(0, |i| i + 1);
-        self.show(Some(next.min(self.last_index())))
+        self.show(Some(next.min(self.last_index())));
     }
 
-    pub fn show_previous(&mut self) -> bool {
+    pub fn show_previous(&mut self) {
         let previous = self.post_list.selected().map_or(0, |i| i.saturating_sub(1));
-        self.show(Some(previous))
+        self.show(Some(previous));
     }
 
-    pub fn show_last(&mut self) -> bool {
-        self.show(self.posts.len().checked_sub(1))
+    pub fn show_last(&mut self) {
+        self.show(self.posts.len().checked_sub(1));
     }
 
     fn last_index(&self) -> usize {
         self.posts.len().saturating_sub(1)
     }
 
-    /// Selects a post, starting it at the top with nothing focused. Returns whether it changed.
-    fn show(&mut self, index: Option<usize>) -> bool {
+    /// Selects a post. A newly selected post starts at the top with nothing focused.
+    fn show(&mut self, index: Option<usize>) {
         let index = index.filter(|_| !self.posts.is_empty());
-        if index == self.post_list.selected() {
-            return false;
+        if index != self.post_list.selected() {
+            self.post_list.select(index);
+            self.doc_state = DocState::default();
         }
-        self.post_list.select(index);
-        self.doc_state = DocState::default();
-        true
     }
 
     /// Lays out the shown post for `ctx`, reusing the previous layout when nothing changed.

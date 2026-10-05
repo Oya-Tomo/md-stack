@@ -107,9 +107,7 @@ impl Server {
                     entry: MathEntry {
                         display: source.display,
                         tex: source.tex,
-                        width_ex: rendered.width_ex,
-                        height_ex: rendered.height_ex,
-                        depth_ex: rendered.depth_ex,
+                        metrics: rendered.metrics,
                     },
                     svg: rendered.svg,
                 }),

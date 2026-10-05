@@ -12,6 +12,8 @@ use chrono::{DateTime, Local};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 
+use crate::math::MathMetrics;
+
 /// Which conversation a running Claude Code process currently shows.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ProcessRecord {
@@ -50,9 +52,8 @@ pub struct PostMeta {
 pub struct MathEntry {
     pub display: bool,
     pub tex: String,
-    pub width_ex: f32,
-    pub height_ex: f32,
-    pub depth_ex: f32,
+    #[serde(flatten)]
+    pub metrics: MathMetrics,
 }
 
 /// A rendered math expression to be stored with a new post.
@@ -276,5 +277,23 @@ fn ignore_not_found(result: std::io::Result<()>, path: &Path) -> Result<()> {
             Err(e).with_context(|| format!("removing {}", path.display()))
         }
         _ => Ok(()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn math_metrics_are_stored_flat() {
+        let json = r#"{"display":true,"tex":"x","width_ex":1.5,"height_ex":2.0,"depth_ex":0.5}"#;
+        let entry: MathEntry = serde_json::from_str(json).unwrap();
+        let metrics = MathMetrics {
+            width: 1.5,
+            height: 2.0,
+            depth: 0.5,
+        };
+        assert_eq!(entry.metrics, metrics);
+        assert_eq!(serde_json::to_string(&entry).unwrap(), json);
     }
 }

@@ -2,23 +2,19 @@
 
 mod render;
 
-use std::sync::mpsc::{self, Receiver};
-use std::time::Duration;
+use std::iter;
 
 use anyhow::{Context, Result};
-use crossterm::event::{self, Event, KeyEventKind};
-use notify::{RecursiveMode, Watcher};
+use crossterm::event::{Event as CrosstermEvent, KeyEventKind};
 use ratatui::DefaultTerminal;
 use ratatui::widgets::ListState;
 
 use super::action::Action;
 use super::clipboard;
+use super::event::{Event, EventHandler};
 use super::graphics::Graphics;
 use super::viewer::Viewer;
 use crate::store::{ProcessRecord, Store};
-
-/// How long to wait for input before checking the store for changes.
-const POLL_INTERVAL: Duration = Duration::from_millis(50);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Screen {
@@ -63,8 +59,8 @@ pub struct App {
     list_placement: ListPlacement,
     message: Option<String>,
     quit: bool,
-    /// Repaint the whole screen before the next frame, which erases stale Sixel images.
-    redraw_all: bool,
+    /// Clear the terminal before the next frame, so that everything is drawn anew.
+    redraw: bool,
 }
 
 impl App {
@@ -80,7 +76,7 @@ impl App {
             list_placement: ListPlacement::Side,
             message: None,
             quit: false,
-            redraw_all: true,
+            redraw: false,
         };
         app.refresh();
         if let [only] = app.sessions.as_slice() {
@@ -91,60 +87,48 @@ impl App {
     }
 
     pub fn run(mut self, terminal: &mut DefaultTerminal) -> Result<()> {
-        let (change_sender, store_changes) = mpsc::channel();
-        let mut watcher = notify::recommended_watcher(move |event: notify::Result<_>| {
-            if event.is_ok() {
-                let _ = change_sender.send(());
-            }
-        })
-        .context("starting the file watcher")?;
-        watcher
-            .watch(self.store.root(), RecursiveMode::Recursive)
-            .with_context(|| format!("watching {}", self.store.root().display()))?;
-
+        let events = EventHandler::new(self.store.root())?;
         while !self.quit {
-            self.draw(terminal)?;
-            self.handle_events(&store_changes)?;
-        }
-        Ok(())
-    }
-
-    fn draw(&mut self, terminal: &mut DefaultTerminal) -> Result<()> {
-        if std::mem::take(&mut self.redraw_all) {
-            terminal.clear()?;
-        }
-        terminal.draw(|frame| self.render(frame))?;
-        Ok(())
-    }
-
-    // Input is polled on this thread: a separate reader thread would hold crossterm's event
-    // reader and starve the cursor-position query that `Terminal::clear` performs.
-    fn handle_events(&mut self, store_changes: &Receiver<()>) -> Result<()> {
-        if event::poll(POLL_INTERVAL)? {
-            match event::read()? {
-                Event::Key(key) if key.kind == KeyEventKind::Press => {
-                    self.message = None;
-                    if let Some(action) = Action::from_key(self.screen, key) {
-                        self.update(action);
-                    }
+            if std::mem::take(&mut self.redraw) {
+                terminal.clear()?;
+            }
+            terminal.draw(|frame| self.render(frame))?;
+            // Handle everything that queued up while drawing, so that a burst of key presses
+            // costs one frame instead of one frame each.
+            let first = events.next()?;
+            let mut store_changed = false;
+            for event in iter::once(first).chain(iter::from_fn(|| events.try_next())) {
+                match event {
+                    Event::Crossterm(event) => self.handle_crossterm_event(&event),
+                    Event::StoreChanged => store_changed = true,
+                    Event::InputFailed(e) => return Err(e).context("reading terminal input"),
                 }
-                Event::Resize(..) => {
-                    self.graphics.clear_cache();
-                    self.redraw_all = true;
-                }
-                _ => {}
+            }
+            if store_changed {
+                self.refresh();
             }
         }
-        // Coalesce a burst of file events into a single re-read.
-        if store_changes.try_iter().count() > 0 {
-            self.refresh();
-        }
         Ok(())
+    }
+
+    fn handle_crossterm_event(&mut self, event: &CrosstermEvent) {
+        match event {
+            CrosstermEvent::Key(key) if key.kind == KeyEventKind::Press => {
+                self.message = None;
+                if let Some(action) = Action::from_key(self.screen, *key) {
+                    self.update(action);
+                }
+            }
+            // Images are laid out for the old size; drop them instead of keeping them around.
+            CrosstermEvent::Resize(..) => self.graphics.clear_cache(),
+            _ => {}
+        }
     }
 
     fn update(&mut self, action: Action) {
         match action {
             Action::Quit => self.quit = true,
+            Action::Redraw => self.redraw = true,
             Action::NextSession => self.session_list.select_next(),
             Action::PreviousSession => self.session_list.select_previous(),
             Action::OpenSession => {
@@ -157,12 +141,10 @@ impl App {
             Action::CloseSessions => {
                 if self.viewer.is_some() {
                     self.screen = Screen::Posts;
-                    self.redraw_all = true;
                 }
             }
             Action::OpenSessions => {
                 self.screen = Screen::Sessions;
-                self.redraw_all = true;
                 self.refresh();
             }
             Action::ToggleFollow => {
@@ -170,13 +152,10 @@ impl App {
                 if self.follow
                     && let Some(viewer) = &mut self.viewer
                 {
-                    self.redraw_all |= viewer.show_last();
+                    viewer.show_last();
                 }
             }
-            Action::MovePostList => {
-                self.list_placement = self.list_placement.next();
-                self.redraw_all = true;
-            }
+            Action::MovePostList => self.list_placement = self.list_placement.next(),
             Action::CopySnippet => self.copy_snippet(),
             Action::CopyPost => self.copy_post(),
             Action::NextPost => self.choose_post(Viewer::show_next),
@@ -185,17 +164,17 @@ impl App {
                 if let Some(viewer) = &mut self.viewer
                     && let (Some(loaded), state) = viewer.parts_mut()
                 {
-                    self.redraw_all |= state.apply(motion, &loaded.doc);
+                    state.apply(motion, &loaded.doc);
                 }
             }
         }
     }
 
     /// Shows another post chosen by hand, which locks the view to it (docs/SPEC.md §6.3).
-    fn choose_post(&mut self, show: fn(&mut Viewer) -> bool) {
+    fn choose_post(&mut self, show: fn(&mut Viewer)) {
         if let Some(viewer) = &mut self.viewer {
             self.follow = false;
-            self.redraw_all |= show(viewer);
+            show(viewer);
         }
     }
 
@@ -220,7 +199,7 @@ impl App {
             })
             .collect::<Result<_>>()?;
         if let Some(viewer) = &mut self.viewer {
-            self.redraw_all |= viewer.refresh(&self.store, self.follow)?;
+            viewer.refresh(&self.store, self.follow)?;
         }
         Ok(())
     }
@@ -230,7 +209,6 @@ impl App {
         self.screen = Screen::Posts;
         self.follow = true;
         self.graphics.clear_cache();
-        self.redraw_all = true;
         // Loads the posts and, since the view follows, shows the latest one.
         self.refresh();
     }

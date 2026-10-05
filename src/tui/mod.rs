@@ -4,6 +4,7 @@ mod action;
 mod app;
 mod clipboard;
 mod doc_view;
+mod event;
 mod graphics;
 mod highlight;
 mod layout;

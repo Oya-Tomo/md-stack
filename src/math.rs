@@ -8,25 +8,44 @@ use std::thread;
 
 use anyhow::{Context as _, Result, anyhow};
 use rquickjs::{Context, Function, Runtime};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use tokio::sync::oneshot;
 
 /// MathJax bundle built from `mathjax/entry.js` (see `mathjax/package.json`).
 const MATHJAX_JS: &str = include_str!("../assets/mathjax.js");
 
+/// Size of a rendered expression as reported by MathJax, in ex.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct MathMetrics {
+    #[serde(rename = "width_ex")]
+    pub width: f32,
+    /// Total height, including the part below the baseline.
+    #[serde(rename = "height_ex")]
+    pub height: f32,
+    /// How far the expression reaches below the baseline.
+    #[serde(rename = "depth_ex")]
+    pub depth: f32,
+}
+
+impl MathMetrics {
+    /// How far the expression reaches above the baseline.
+    pub fn ascent(&self) -> f32 {
+        self.height - self.depth
+    }
+}
+
 #[derive(Debug, Clone, Deserialize)]
 pub struct Rendered {
     pub svg: String,
-    pub width_ex: f32,
-    pub height_ex: f32,
-    pub depth_ex: f32,
+    #[serde(flatten)]
+    pub metrics: MathMetrics,
 }
 
 /// One expression's outcome; `Err` carries MathJax's error message.
 pub type Outcome = std::result::Result<Rendered, String>;
 
 struct Job {
-    items: Vec<(String, bool)>,
+    expressions: Vec<(String, bool)>,
     reply: oneshot::Sender<Result<Vec<Outcome>>>,
 }
 
@@ -42,7 +61,7 @@ impl MathRenderer {
             let engine = Engine::new();
             for job in receiver {
                 let result = match &engine {
-                    Ok(engine) => engine.render(&job.items),
+                    Ok(engine) => engine.render(&job.expressions),
                     Err(e) => Err(anyhow!("MathJax failed to load: {e:#}")),
                 };
                 let _ = job.reply.send(result);
@@ -52,10 +71,10 @@ impl MathRenderer {
     }
 
     /// Renders `(tex, display)` pairs as one batch; macros defined in the batch stay local to it.
-    pub async fn render(&self, items: Vec<(String, bool)>) -> Result<Vec<Outcome>> {
+    pub async fn render(&self, expressions: Vec<(String, bool)>) -> Result<Vec<Outcome>> {
         let (reply, response) = oneshot::channel();
         self.jobs
-            .send(Job { items, reply })
+            .send(Job { expressions, reply })
             .map_err(|_| anyhow!("math engine thread has stopped"))?;
         response.await.context("math engine thread has stopped")?
     }
@@ -83,8 +102,8 @@ impl Engine {
         Ok(Self { context })
     }
 
-    fn render(&self, items: &[(String, bool)]) -> Result<Vec<Outcome>> {
-        let (sources, displays): (Vec<String>, Vec<bool>) = items.iter().cloned().unzip();
+    fn render(&self, expressions: &[(String, bool)]) -> Result<Vec<Outcome>> {
+        let (sources, displays): (Vec<String>, Vec<bool>) = expressions.iter().cloned().unzip();
         let json: String = self.context.with(|ctx| {
             let render: Function = ctx.globals().get("mdStackRenderTex")?;
             render.call((sources, displays))
@@ -123,7 +142,7 @@ mod tests {
         ]);
         let ok = out[0].as_ref().unwrap();
         assert!(ok.svg.starts_with("<svg"));
-        assert!(ok.width_ex > 0.0 && ok.height_ex > 0.0);
+        assert!(ok.metrics.width > 0.0 && ok.metrics.height > 0.0);
         assert_eq!(out[1].as_ref().unwrap_err(), "Missing close brace");
         assert_eq!(
             out[2].as_ref().unwrap_err(),

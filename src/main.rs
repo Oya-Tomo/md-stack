@@ -26,7 +26,7 @@ enum Command {
     Mcp,
     /// Run the `SessionStart` hook (spawned by Claude Code)
     Hook,
-    /// Open the viewer in this terminal (Sixel support required)
+    /// Open the viewer in this terminal
     Tui,
 }
 

@@ -50,9 +50,8 @@ impl DocState {
         self.focus
     }
 
-    /// Applies `motion` within `doc`. Returns whether the view scrolled, since moved Sixel
-    /// images need a full repaint before the next frame.
-    pub fn apply(&mut self, motion: Motion, doc: &Doc) -> bool {
+    /// Applies `motion` within `doc`.
+    pub fn apply(&mut self, motion: Motion, doc: &Doc) {
         let half_page = (self.page_lines / 2).max(1);
         match motion {
             Motion::LineDown => self.scroll_to(self.scroll + 1, doc),
@@ -64,7 +63,7 @@ impl DocState {
             Motion::NextSnippet | Motion::PreviousSnippet => {
                 let count = doc.snippets.len();
                 if count == 0 {
-                    return false;
+                    return;
                 }
                 self.focus = Some(match (self.focus, motion) {
                     (Some(f), Motion::NextSnippet) => (f + 1) % count,
@@ -72,7 +71,7 @@ impl DocState {
                     (None, Motion::NextSnippet) => 0,
                     (None, _) => count - 1,
                 });
-                self.reveal_focus(doc)
+                self.reveal_focus(doc);
             }
         }
     }
@@ -81,22 +80,23 @@ impl DocState {
         self.error.take()
     }
 
-    /// Makes `line` the first visible line, clamped to the document. Returns whether it moved.
-    fn scroll_to(&mut self, line: usize, doc: &Doc) -> bool {
-        let line = line.min(doc.lines.len().saturating_sub(1));
-        std::mem::replace(&mut self.scroll, line) != line
+    /// Makes `line` the first visible line, clamped to the document.
+    fn scroll_to(&mut self, line: usize, doc: &Doc) {
+        self.scroll = line.min(doc.lines.len().saturating_sub(1));
     }
 
     /// Scrolls the focused snippet's first line into the last rendered page.
-    fn reveal_focus(&mut self, doc: &Doc) -> bool {
+    fn reveal_focus(&mut self, doc: &Doc) {
         let Some(line) = self
             .focus
             .and_then(|focus| doc.lines.iter().position(|l| l.snippets.contains(&focus)))
         else {
-            return false;
+            return;
         };
         let visible = self.scroll..self.scroll + self.page_lines;
-        !visible.contains(&line) && self.scroll_to(line.saturating_sub(REVEAL_CONTEXT), doc)
+        if !visible.contains(&line) {
+            self.scroll_to(line.saturating_sub(REVEAL_CONTEXT), doc);
+        }
     }
 }
 

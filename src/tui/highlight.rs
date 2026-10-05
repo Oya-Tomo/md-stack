@@ -1,6 +1,7 @@
 //! Syntax highlighting of fenced code blocks.
 
 use std::sync::LazyLock;
+use std::thread;
 
 use ratatui::style::{Color, Style};
 use ratatui::text::Span;
@@ -8,6 +9,8 @@ use syntect::easy::HighlightLines;
 use syntect::highlighting::{Theme, ThemeSet};
 use syntect::parsing::SyntaxSet;
 use syntect::util::LinesWithEndings;
+
+use crate::document;
 
 /// bat's curated syntaxes; syntect's own defaults lack common languages such as TypeScript.
 static SYNTAXES: LazyLock<SyntaxSet> = LazyLock::new(two_face::syntax::extra_newlines);
@@ -19,6 +22,22 @@ pub fn theme(dark: bool) -> &'static Theme {
     } else {
         "InspiredGitHub"
     }]
+}
+
+/// Highlights the code blocks of `markdowns` on a background thread.
+///
+/// syntect compiles a language's rules on its first use, which takes a noticeable fraction of a
+/// second for large syntaxes such as TypeScript. The compiled rules are shared, so preparing
+/// posts as they arrive keeps opening them fast.
+pub fn prepare(markdowns: Vec<String>) {
+    thread::spawn(move || {
+        for markdown in markdowns {
+            for block in document::code_blocks(&markdown) {
+                // The theme only colors the result; the compiled rules are the same for all.
+                highlight(&block.code, &block.lang, theme(true));
+            }
+        }
+    });
 }
 
 /// Highlights `code` line by line. Unknown languages are returned unstyled.

@@ -1,4 +1,5 @@
-//! Math images: sizing on the cell grid, SVG rasterization and Sixel encoding.
+//! Math images: sizing on the cell grid, SVG rasterization, and encoding for the terminal's
+//! graphics protocol.
 
 use std::collections::HashMap;
 use std::collections::hash_map::Entry;
@@ -9,7 +10,7 @@ use anyhow::{Context, Result};
 use image::{DynamicImage, RgbaImage};
 use ratatui::layout::Size;
 use ratatui_image::picker::cap_parser::QueryStdioOptions;
-use ratatui_image::picker::{Capability, Picker, ProtocolType};
+use ratatui_image::picker::{Capability, Picker};
 use ratatui_image::protocol::Protocol;
 use ratatui_image::{FontSize, Resize};
 use resvg::{tiny_skia, usvg};
@@ -43,14 +44,13 @@ impl MathGeometry {
         let (cell_w, cell_h) = (f32::from(font.width), f32::from(font.height));
         let natural = cell_h * EX_PER_CELL_HEIGHT * if entry.display { DISPLAY_SCALE } else { 1.0 };
         let max_width_px = f32::from(max_cols.max(1)) * cell_w;
-        let px_per_ex = natural.min(max_width_px / entry.width_ex.max(f32::EPSILON));
+        let metrics = &entry.metrics;
+        let px_per_ex = natural.min(max_width_px / metrics.width.max(f32::EPSILON));
         // Rows needed for the part of the expression that overflows the baseline row.
         let overflow_rows = |px: f32| (px / cell_h).ceil().max(0.0) as u16;
-        let ascent = (entry.height_ex - entry.depth_ex) * px_per_ex;
-        let descent = entry.depth_ex * px_per_ex;
-        let above = overflow_rows(ascent - BASELINE_IN_CELL * cell_h);
-        let below = overflow_rows(descent - (1.0 - BASELINE_IN_CELL) * cell_h);
-        let cols = ((entry.width_ex * px_per_ex / cell_w).ceil() as u16).max(1);
+        let above = overflow_rows(metrics.ascent() * px_per_ex - BASELINE_IN_CELL * cell_h);
+        let below = overflow_rows(metrics.depth * px_per_ex - (1.0 - BASELINE_IN_CELL) * cell_h);
+        let cols = ((metrics.width * px_per_ex / cell_w).ceil() as u16).max(1);
         Self {
             cols: cols.min(max_cols.max(1)),
             rows: above + 1 + below,
@@ -75,17 +75,15 @@ struct CacheKey {
 }
 
 impl Graphics {
-    /// Queries the terminal for its cell size and background color.
+    /// Queries the terminal for its graphics protocol, cell size and background color.
     ///
     /// Must run after entering the alternate screen and before input events are read.
     pub fn query() -> Result<Self> {
-        let mut picker = Picker::from_query_stdio_with_options(QueryStdioOptions {
+        let picker = Picker::from_query_stdio_with_options(QueryStdioOptions {
             terminal_background_color_osc: true,
             ..Default::default()
         })
         .context("querying terminal graphics capabilities")?;
-        // Sixel is the only supported protocol (docs/SPEC.md §1.2), so it is not auto-detected.
-        picker.set_protocol_type(ProtocolType::Sixel);
 
         let (r, g, b) = picker
             .capabilities()
@@ -176,8 +174,8 @@ impl Rasterizer {
         let mut pixmap = tiny_skia::Pixmap::new(width, height).context("empty math image")?;
         pixmap.fill(self.background);
 
-        let content_width = entry.width_ex * geometry.px_per_ex;
-        let ascent = (entry.height_ex - entry.depth_ex) * geometry.px_per_ex;
+        let content_width = entry.metrics.width * geometry.px_per_ex;
+        let ascent = entry.metrics.ascent() * geometry.px_per_ex;
         let baseline_y =
             (f32::from(geometry.baseline_row) + BASELINE_IN_CELL) * f32::from(font.height);
         let scale = content_width / tree.size().width();
@@ -212,14 +210,17 @@ fn css_color(color: tiny_skia::Color) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::math::MathMetrics;
 
     fn entry(display: bool, width_ex: f32, height_ex: f32, depth_ex: f32) -> MathEntry {
         MathEntry {
             display,
             tex: String::new(),
-            width_ex,
-            height_ex,
-            depth_ex,
+            metrics: MathMetrics {
+                width: width_ex,
+                height: height_ex,
+                depth: depth_ex,
+            },
         }
     }
 

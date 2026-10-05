@@ -14,7 +14,7 @@ and shows it in a TUI viewer running in a separate terminal, where it is rendere
 
 ### 1.2 Non-goals
 
-- Terminals without Sixel support (there is no fallback display for terminals that cannot show images)
+- A good experience in terminals without a graphics protocol (they get `ratatui-image`'s low-resolution half-block fallback)
 - Operating systems other than Linux (process information is read from `/proc`; left open for later)
 - Editing or appending to posts (e.g. an `update` tool); to be considered when needed
 
@@ -204,10 +204,10 @@ The MCP `instructions` tell Claude to:
 
 ### 6.1 Requirements
 
-- A terminal with Sixel support (e.g. WezTerm)
+- A terminal with a graphics protocol supported by `ratatui-image` (Kitty, iTerm2 or Sixel), e.g. WezTerm, kitty, Ghostty or foot
 - A terminal that allows clipboard writes through OSC 52
 
-At startup the TUI queries the terminal for the cell size in pixels, which is used to scale math images.
+At startup `ratatui-image` queries the terminal for its graphics protocol and cell size in pixels. The protocol is chosen by `ratatui-image` (for example iTerm2 in WezTerm, whose other protocols are unreliable), and the cell size scales math images.
 
 ### 6.2 Session selection
 
@@ -243,11 +243,10 @@ s:sessions  J/K:post  j/k:scroll  Tab:snippet  y:copy  Y:copy post  f:follow/loc
 
 - Markdown: headings, emphasis, lists, block quotes, tables, links, rules, code blocks and math
 - Code blocks: drawn in a rounded box with the language and snippet number on the top edge, with syntax highlighting based on the language tag
-- Display math: the SVG is rasterized and shown centered as a Sixel image
+- Display math: the SVG is rasterized and shown centered as an image
 - Inline math: the SVG is rasterized and embedded in the text as an image. The TUI wraps text itself, reserving cells for the image width. Images sit on the text baseline; a line grows by the rows an image needs above or below the baseline
 - Rasterized images are cached per cell size and post
 - The background color is queried from the terminal with OSC 11 at startup and decides the image background and the math color (light on dark backgrounds)
-- To avoid stale Sixel images, the whole screen is redrawn whenever scrolling or switching posts moves images
 
 ### 6.5 Snippets
 
@@ -269,6 +268,7 @@ Copying math yields its TeX source (without the `$` delimiters).
 | `f` | Switch between follow and lock mode |
 | `p` | Move the post list: left → bottom → hidden |
 | `s` | Open the session selection screen |
+| `Ctrl+L` | Redraw the whole screen |
 | `q` | Quit |
 
 Copying uses OSC 52.
@@ -298,7 +298,7 @@ The `md-stack` binary is expected to be on `PATH`.
 | Purpose | Library |
 |---|---|
 | TUI | `ratatui`, `crossterm` |
-| Sixel images | `ratatui-image` |
+| Terminal images | `ratatui-image` |
 | MCP | `rmcp` (official Rust SDK) |
 | Markdown parsing | `pulldown-cmark` (with the math extension) |
 | Syntax highlighting | `syntect` (with the pure-Rust regex engine `fancy-regex`), with the syntax definitions curated by `bat` from `two-face` |
@@ -309,6 +309,6 @@ The `md-stack` binary is expected to be on `PATH`.
 
 ## 10. Open issues
 
-- Drawing performance of the right pane for very long posts (how Sixel images are redrawn while scrolling)
+- Drawing performance of the right pane for very long posts
 - TUI colors and themes
 - Math inside table cells is shown as `$...$` text, not as images
