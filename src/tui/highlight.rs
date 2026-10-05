@@ -9,7 +9,8 @@ use syntect::highlighting::{Theme, ThemeSet};
 use syntect::parsing::SyntaxSet;
 use syntect::util::LinesWithEndings;
 
-static SYNTAXES: LazyLock<SyntaxSet> = LazyLock::new(SyntaxSet::load_defaults_newlines);
+/// bat's curated syntaxes; syntect's own defaults lack common languages such as TypeScript.
+static SYNTAXES: LazyLock<SyntaxSet> = LazyLock::new(two_face::syntax::extra_newlines);
 static THEMES: LazyLock<ThemeSet> = LazyLock::new(ThemeSet::load_defaults);
 
 pub fn theme(dark: bool) -> &'static Theme {
@@ -47,4 +48,32 @@ pub fn highlight(code: &str, lang: &str, theme: &Theme) -> Vec<Vec<Span<'static>
             Err(_) => vec![Span::raw(line.trim_end_matches('\n').to_owned())],
         })
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Whether highlighting gave the code more than one color.
+    fn is_colored(code: &str, lang: &str) -> bool {
+        let lines = highlight(code, lang, theme(true));
+        let mut colors: Vec<_> = lines.iter().flatten().map(|span| span.style.fg).collect();
+        colors.dedup();
+        colors.len() > 1
+    }
+
+    #[test]
+    fn highlights_languages_missing_from_syntect_defaults() {
+        assert!(is_colored("const n: number = 1;\n", "ts"));
+        assert!(is_colored(
+            "function f(x)\n    return x + 1\nend\n",
+            "julia"
+        ));
+        assert!(is_colored("[package]\nname = \"md-stack\"\n", "toml"));
+    }
+
+    #[test]
+    fn unknown_languages_are_plain() {
+        assert!(!is_colored("anything at all\n", "no-such-language"));
+    }
 }

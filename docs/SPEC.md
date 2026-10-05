@@ -301,7 +301,7 @@ The `md-stack` binary is expected to be on `PATH`.
 | Sixel images | `ratatui-image` |
 | MCP | `rmcp` (official Rust SDK) |
 | Markdown parsing | `pulldown-cmark` (with the math extension) |
-| Syntax highlighting | `syntect` (with the pure-Rust regex engine `fancy-regex`) |
+| Syntax highlighting | `syntect` (with the pure-Rust regex engine `fancy-regex`), with the syntax definitions curated by `bat` from `two-face` |
 | JS engine (runs MathJax) | `rquickjs` (QuickJS) |
 | MathJax | `mathjax-full` 3.2.2, bundled into one file with `esbuild` and embedded in the binary as `assets/mathjax.js` |
 | SVG rasterization | `resvg` |
