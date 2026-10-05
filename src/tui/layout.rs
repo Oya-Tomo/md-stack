@@ -27,6 +27,7 @@ pub struct Doc {
 #[derive(Debug, Default)]
 pub struct DocLine {
     pub height: u16,
+    /// Ordered by row, then column.
     pub segments: Vec<Segment>,
     /// Snippets (indices into [`Doc::snippets`]) shown on this line.
     pub snippets: Vec<usize>,
@@ -38,6 +39,16 @@ pub struct Segment {
     /// Row offset within the line.
     pub row: u16,
     pub content: SegmentContent,
+}
+
+impl Segment {
+    fn text(col: u16, row: u16, span: Span<'static>) -> Self {
+        Self {
+            col,
+            row,
+            content: SegmentContent::Text(span),
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -100,6 +111,7 @@ const LINK: Style = Style::new()
     .add_modifier(Modifier::UNDERLINED);
 
 /// Inline content waiting to be wrapped into lines.
+#[derive(Clone)]
 enum Atom {
     Word(String, Style),
     Space,
@@ -117,10 +129,11 @@ enum Container {
     },
 }
 
+/// A table being collected; each cell holds the inline atoms of its content.
+#[derive(Default)]
 struct Table {
-    rows: Vec<Vec<String>>,
-    row: Vec<String>,
-    cell: String,
+    rows: Vec<Vec<Vec<Atom>>>,
+    row: Vec<Vec<Atom>>,
     header_rows: usize,
 }
 
@@ -236,15 +249,13 @@ impl Builder {
             }
             Tag::Table(_) => {
                 self.start_block();
-                self.table = Some(Table {
-                    rows: Vec::new(),
-                    row: Vec::new(),
-                    cell: String::new(),
-                    header_rows: 0,
-                });
+                self.table = Some(Table::default());
             }
             Tag::Emphasis => self.push_style(Style::new().add_modifier(Modifier::ITALIC)),
-            Tag::Strong => self.push_style(Style::new().add_modifier(Modifier::BOLD)),
+            // Header rows of tables are bold, like strong text.
+            Tag::Strong | Tag::TableHead => {
+                self.push_style(Style::new().add_modifier(Modifier::BOLD));
+            }
             Tag::Strikethrough => self.push_style(Style::new().add_modifier(Modifier::CROSSED_OUT)),
             Tag::Link { .. } => self.push_style(LINK),
             Tag::Image { .. } => {
@@ -282,6 +293,7 @@ impl Builder {
                 self.containers.pop();
             }
             TagEnd::TableHead => {
+                self.styles.pop();
                 if let Some(table) = &mut self.table {
                     table.rows.push(mem::take(&mut table.row));
                     table.header_rows = table.rows.len();
@@ -294,12 +306,12 @@ impl Builder {
             }
             TagEnd::TableCell => {
                 if let Some(table) = &mut self.table {
-                    table.row.push(mem::take(&mut table.cell).trim().to_owned());
+                    table.row.push(mem::take(&mut self.inline));
                 }
             }
             TagEnd::Table => {
                 if let Some(table) = self.table.take() {
-                    self.render_table(&table);
+                    self.render_table(table);
                 }
                 self.blank_pending = true;
             }
@@ -317,8 +329,6 @@ impl Builder {
     fn text(&mut self, text: &str) {
         if let Some(code) = &mut self.code {
             code.code.push_str(text);
-        } else if let Some(table) = &mut self.table {
-            table.cell.push_str(text);
         } else {
             self.inline_text(text, self.style());
         }
@@ -330,11 +340,6 @@ impl Builder {
         if index >= self.math.len() {
             // The stored metadata does not match the Markdown; show the source instead.
             self.inline_text(&format!("${tex}$"), INLINE_CODE);
-            return;
-        }
-        if let Some(table) = &mut self.table {
-            // Table cells hold plain text only.
-            table.cell.extend(["$", tex, "$"]);
             return;
         }
         let snippet = self.doc.snippets.len();
@@ -374,12 +379,10 @@ impl Builder {
     }
 
     fn content_width(&self) -> u16 {
-        let indent: usize = self
-            .containers
-            .iter()
-            .map(|c| c.continuation().width())
-            .sum();
-        self.ctx.width.saturating_sub(to_cols(indent)).max(1)
+        self.ctx
+            .width
+            .saturating_sub(str_cols(&self.continuation()))
+            .max(1)
     }
 
     /// Draws a code block in a rounded box with its language and block number on the top edge.
@@ -443,48 +446,67 @@ impl Builder {
         self.push_line(line);
     }
 
-    fn render_table(&mut self, table: &Table) {
+    /// Lays out a table, wrapping cells inside their columns when it is too wide.
+    fn render_table(&mut self, table: Table) {
         const SEPARATOR: &str = " │ ";
+        const MIN_COLUMN_WIDTH: u16 = 3;
         let columns = table.rows.iter().map(Vec::len).max().unwrap_or(0);
         if columns == 0 {
             return;
         }
-        let mut widths = vec![1usize; columns];
+
+        // Each column starts as wide as its widest cell laid out on one line.
+        let mut widths = vec![1; columns];
         for row in &table.rows {
             for (width, cell) in widths.iter_mut().zip(row) {
-                *width = (*width).max(cell.width());
+                let natural = self.wrap(cell.clone(), u16::MAX);
+                *width = natural.iter().map(|line| line.width).fold(*width, u16::max);
             }
         }
-        // Shrink the widest columns until the table fits.
         let available = usize::from(self.content_width());
         let separators = SEPARATOR.width() * (columns - 1);
-        while widths.iter().sum::<usize>() + separators > available {
+        while widths.iter().map(|&w| usize::from(w)).sum::<usize>() + separators > available {
             let widest = widths.iter_mut().max().expect("columns > 0");
-            if *widest <= 3 {
+            if *widest <= MIN_COLUMN_WIDTH {
                 break;
             }
             *widest -= 1;
         }
 
-        for (i, row) in table.rows.iter().enumerate() {
-            let style = if i < table.header_rows {
-                Style::new().add_modifier(Modifier::BOLD)
-            } else {
-                Style::new()
-            };
-            let mut line = LineBuilder::default();
-            for (c, &width) in widths.iter().enumerate() {
-                if c > 0 {
-                    line.push_text(SEPARATOR, DIM);
+        for (index, row) in table.rows.into_iter().enumerate() {
+            let cells: Vec<_> = row
+                .into_iter()
+                .zip(&widths)
+                .map(|(cell, &width)| self.wrap(cell, width))
+                .collect();
+            // The first lines of all cells share a baseline; each cell's further lines follow
+            // right below its own previous line.
+            let baseline = cells
+                .iter()
+                .filter_map(|lines| lines.first())
+                .map(|line| line.above)
+                .max()
+                .unwrap_or(0);
+            let mut block = Block::new(baseline);
+            let mut col = 0;
+            let mut cells = cells.into_iter();
+            for (column, &width) in widths.iter().enumerate() {
+                if column > 0 {
+                    block.add_rule(col, Span::styled(SEPARATOR, DIM));
+                    col += str_cols(SEPARATOR);
                 }
-                line.push_text(
-                    &fit_to_width(row.get(c).map_or("", String::as_str), width),
-                    style,
-                );
+                let mut top = None;
+                for line in cells.next().into_iter().flatten() {
+                    let line_top = top.unwrap_or(baseline - line.above);
+                    top = Some(line_top + line.height());
+                    block.add(line, line_top, col);
+                }
+                col += width;
             }
-            self.push_line(line);
-            if i + 1 == table.header_rows {
-                let rule: Vec<String> = widths.iter().map(|&w| "─".repeat(w)).collect();
+            self.push_block(block);
+            if index + 1 == table.header_rows {
+                let rule: Vec<String> =
+                    widths.iter().map(|&w| "─".repeat(usize::from(w))).collect();
                 let mut line = LineBuilder::default();
                 line.push_text(&rule.join("─┼─"), DIM);
                 self.push_line(line);
@@ -525,70 +547,44 @@ impl Builder {
         }
     }
 
-    /// Wraps the pending inline atoms into lines.
+    /// Wraps the pending inline atoms into lines of the document.
     fn flush_inline(&mut self) {
         let atoms = mem::take(&mut self.inline);
         if atoms.is_empty() {
             return;
         }
-        let width = self.content_width();
-        let mut line = LineBuilder::default();
-        let mut space_pending = false;
+        for line in self.wrap(atoms, self.content_width()) {
+            self.push_line(line);
+        }
+    }
+
+    /// Wraps inline atoms into lines at most `width` columns wide.
+    fn wrap(&self, atoms: Vec<Atom>, width: u16) -> Vec<LineBuilder> {
+        let mut wrapper = Wrapper::new(width);
         for atom in atoms {
             match atom {
-                Atom::Space => space_pending = line.width > 0,
-                Atom::Break => {
-                    self.push_line(mem::take(&mut line));
-                    space_pending = false;
-                }
-                Atom::Word(word, style) => {
-                    let word_width = str_cols(&word);
-                    self.break_or_space(&mut line, &mut space_pending, word_width, width);
-                    if word_width <= width {
-                        line.push_text(&word, style);
-                        continue;
-                    }
-                    // Longer than a whole line: break between characters.
-                    for ch in word.chars() {
-                        let ch_width = to_cols(ch.width().unwrap_or(0));
-                        if line.width + ch_width > width {
-                            self.push_line(mem::take(&mut line));
-                        }
-                        line.push_text(ch.encode_utf8(&mut [0; 4]), style);
-                    }
-                }
+                Atom::Space => wrapper.space(),
+                Atom::Break => wrapper.break_line(),
+                Atom::Word(word, style) => wrapper.word(&word, style),
                 Atom::Math { index, snippet } => {
                     let geometry = MathGeometry::fit(&self.math[index], self.ctx.font, width);
-                    self.break_or_space(&mut line, &mut space_pending, geometry.cols, width);
-                    line.push_math(index, geometry);
-                    line.snippets.push(snippet);
+                    wrapper.math(index, snippet, geometry);
                 }
             }
         }
-        self.push_line(line);
-    }
-
-    /// Before placing an item of `item_width`, wraps to a new line or emits the pending space.
-    fn break_or_space(
-        &mut self,
-        line: &mut LineBuilder,
-        space_pending: &mut bool,
-        item_width: u16,
-        width: u16,
-    ) {
-        let space = u16::from(*space_pending);
-        if line.width > 0 && line.width + space + item_width > width {
-            self.push_line(mem::take(line));
-        } else if *space_pending {
-            line.push_text(" ", Style::new());
-        }
-        *space_pending = false;
+        wrapper.finish()
     }
 
     // --- Line output ---
 
     /// Appends a content line. The first line inside a list item shows the item's marker.
     fn push_line(&mut self, line: LineBuilder) {
+        self.push_block(Block::from(line));
+    }
+
+    /// Appends laid-out content. Its first output inside a list item shows the item's marker.
+    fn push_block(&mut self, block: Block) {
+        let continuation = self.continuation();
         let mut indent = String::new();
         for container in &mut self.containers {
             match container {
@@ -602,45 +598,55 @@ impl Builder {
                 container => indent.push_str(&container.continuation()),
             }
         }
-        self.append(indent, line);
+        self.emit(&indent, &continuation, block);
     }
 
     /// Appends an empty line that separates blocks; it never shows a list marker.
     fn push_blank_line(&mut self) {
-        let indent = self
-            .containers
-            .iter()
-            .map(Container::continuation)
-            .collect();
-        self.append(indent, LineBuilder::default());
+        let continuation = self.continuation();
+        self.emit(&continuation, &continuation, Block::new(0));
     }
 
-    /// Appends `line` behind `indent`, placing text on the baseline row and math around it.
-    fn append(&mut self, indent: String, line: LineBuilder) {
-        let indent_width = str_cols(&indent);
-        let text_row = line.above;
-        let height = line.above + 1 + line.below;
+    /// The indentation of lines (and rows) that show no list marker.
+    fn continuation(&self) -> String {
+        self.containers
+            .iter()
+            .map(Container::continuation)
+            .collect()
+    }
 
-        let mut segments = Vec::with_capacity(line.segments.len() + 1);
-        if !indent.is_empty() {
-            segments.push(Segment {
-                col: 0,
-                row: text_row,
-                content: SegmentContent::Text(Span::styled(indent, DIM)),
-            });
-        }
-        for mut segment in line.segments {
-            segment.col += indent_width;
-            segment.row = match &segment.content {
-                SegmentContent::Text(_) => text_row,
-                SegmentContent::Math { geometry, .. } => text_row - geometry.baseline_row,
+    /// Adds `block` to the document behind its indentation: `indent` on the text row and
+    /// `continuation` on the other rows.
+    fn emit(&mut self, indent: &str, continuation: &str, block: Block) {
+        let indent_width = str_cols(indent);
+        let mut segments = Vec::with_capacity(block.segments.len() + 1);
+        for row in 0..block.height {
+            let row_indent = if row == block.text_row {
+                indent
+            } else {
+                continuation
             };
-            segments.push(segment);
+            // Rows of plain spaces need no segment.
+            if !row_indent.trim().is_empty() {
+                segments.push(Segment::text(
+                    0,
+                    row,
+                    Span::styled(row_indent.to_owned(), DIM),
+                ));
+            }
+            for (col, rule) in &block.rules {
+                segments.push(Segment::text(col + indent_width, row, rule.clone()));
+            }
         }
+        segments.extend(block.segments.into_iter().map(|mut segment| {
+            segment.col += indent_width;
+            segment
+        }));
+        segments.sort_by_key(|segment| (segment.row, segment.col));
         self.doc.lines.push(DocLine {
-            height,
+            height: block.height,
             segments,
-            snippets: line.snippets,
+            snippets: block.snippets,
         });
     }
 }
@@ -662,6 +668,124 @@ fn heading_style(level: HeadingLevel) -> Style {
         HeadingLevel::H2 => bold.fg(Color::Cyan),
         HeadingLevel::H3 => bold.fg(Color::Blue),
         _ => bold,
+    }
+}
+
+/// Greedy line breaking of inline content at a fixed width.
+struct Wrapper {
+    width: u16,
+    lines: Vec<LineBuilder>,
+    line: LineBuilder,
+    /// A space between words, emitted only if the next item stays on the same line.
+    space_pending: bool,
+}
+
+impl Wrapper {
+    fn new(width: u16) -> Self {
+        Self {
+            width,
+            lines: Vec::new(),
+            line: LineBuilder::default(),
+            space_pending: false,
+        }
+    }
+
+    fn space(&mut self) {
+        self.space_pending = self.line.width > 0;
+    }
+
+    fn break_line(&mut self) {
+        self.lines.push(mem::take(&mut self.line));
+        self.space_pending = false;
+    }
+
+    fn word(&mut self, word: &str, style: Style) {
+        let word_width = str_cols(word);
+        self.make_room(word_width);
+        if word_width <= self.width {
+            self.line.push_text(word, style);
+            return;
+        }
+        // Longer than a whole line: break between characters.
+        for ch in word.chars() {
+            if self.line.width + to_cols(ch.width().unwrap_or(0)) > self.width {
+                self.break_line();
+            }
+            self.line.push_text(ch.encode_utf8(&mut [0; 4]), style);
+        }
+    }
+
+    fn math(&mut self, index: usize, snippet: usize, geometry: MathGeometry) {
+        self.make_room(geometry.cols);
+        self.line.push_math(index, geometry);
+        self.line.snippets.push(snippet);
+    }
+
+    /// Before placing an item `item_width` wide, wraps to a new line or emits the pending space.
+    fn make_room(&mut self, item_width: u16) {
+        let space = u16::from(self.space_pending);
+        if self.line.width > 0 && self.line.width + space + item_width > self.width {
+            self.break_line();
+        } else if self.space_pending {
+            self.line.push_text(" ", Style::new());
+        }
+        self.space_pending = false;
+    }
+
+    fn finish(mut self) -> Vec<LineBuilder> {
+        self.lines.push(self.line);
+        self.lines
+    }
+}
+
+/// Content placed on rows: one line, or a table row whose cells stack several lines.
+struct Block {
+    height: u16,
+    /// The row that holds the first line's text, where a list marker goes.
+    text_row: u16,
+    segments: Vec<Segment>,
+    /// Text repeated on every row, such as a table's column separators.
+    rules: Vec<(u16, Span<'static>)>,
+    snippets: Vec<usize>,
+}
+
+impl Block {
+    fn new(text_row: u16) -> Self {
+        Self {
+            height: text_row + 1,
+            text_row,
+            segments: Vec::new(),
+            rules: Vec::new(),
+            snippets: Vec::new(),
+        }
+    }
+
+    /// Places `line` with its top at row `top` and its left edge at column `col`; its text goes
+    /// on its baseline row and its math images around it.
+    fn add(&mut self, line: LineBuilder, top: u16, col: u16) {
+        let baseline = top + line.above;
+        self.height = self.height.max(top + line.height());
+        for mut segment in line.segments {
+            segment.col += col;
+            segment.row = match &segment.content {
+                SegmentContent::Text(_) => baseline,
+                SegmentContent::Math { geometry, .. } => baseline - geometry.baseline_row,
+            };
+            self.segments.push(segment);
+        }
+        self.snippets.extend(line.snippets);
+    }
+
+    fn add_rule(&mut self, col: u16, rule: Span<'static>) {
+        self.rules.push((col, rule));
+    }
+}
+
+impl From<LineBuilder> for Block {
+    fn from(line: LineBuilder) -> Self {
+        let mut block = Self::new(line.above);
+        block.add(line, 0, 0);
+        block
     }
 }
 
@@ -717,6 +841,10 @@ impl LineBuilder {
         });
     }
 
+    fn height(&self) -> u16 {
+        self.above + 1 + self.below
+    }
+
     fn push_math(&mut self, index: usize, geometry: MathGeometry) {
         self.segments.push(Segment {
             col: self.width,
@@ -764,25 +892,6 @@ fn wrap_spans(spans: Vec<Span<'static>>, width: u16) -> Vec<Vec<Span<'static>>> 
     lines
 }
 
-/// Pads or truncates (with an ellipsis) to exactly `width` columns.
-fn fit_to_width(text: &str, width: usize) -> String {
-    if text.width() <= width {
-        return format!("{text}{}", " ".repeat(width - text.width()));
-    }
-    let mut out = String::new();
-    let mut used = 0;
-    for ch in text.chars() {
-        let ch_width = ch.width().unwrap_or(0);
-        if used + ch_width + 1 > width {
-            break;
-        }
-        out.push(ch);
-        used += ch_width;
-    }
-    out.push('…');
-    format!("{out}{}", " ".repeat(width - used - 1))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -795,21 +904,53 @@ mod tests {
         }
     }
 
-    fn text_of(line: &DocLine) -> String {
-        let mut out = String::new();
-        for segment in &line.segments {
-            let col = usize::from(segment.col);
-            if out.width() < col {
-                out.push_str(&" ".repeat(col - out.width()));
-            }
-            match &segment.content {
-                SegmentContent::Text(span) => out.push_str(&span.content),
-                SegmentContent::Math { geometry, .. } => {
-                    out.push_str(&"M".repeat(usize::from(geometry.cols)));
+    /// The document as the terminal shows it, one string per row. Math images are drawn as
+    /// `M` over the cells they cover.
+    fn screen(doc: &Doc) -> Vec<String> {
+        let mut rows = Vec::new();
+        for line in &doc.lines {
+            let mut cells: Vec<Vec<(u16, String)>> = vec![Vec::new(); usize::from(line.height)];
+            for segment in &line.segments {
+                match &segment.content {
+                    SegmentContent::Text(span) => {
+                        cells[usize::from(segment.row)]
+                            .push((segment.col, span.content.to_string()));
+                    }
+                    SegmentContent::Math { geometry, .. } => {
+                        for row in segment.row..segment.row + geometry.rows {
+                            let image = "M".repeat(usize::from(geometry.cols));
+                            cells[usize::from(row)].push((segment.col, image));
+                        }
+                    }
                 }
             }
+            for mut row in cells {
+                row.sort_by_key(|(col, _)| *col);
+                let mut out = String::new();
+                for (col, text) in row {
+                    let col = usize::from(col);
+                    if out.width() < col {
+                        out.push_str(&" ".repeat(col - out.width()));
+                    }
+                    out.push_str(&text);
+                }
+                rows.push(out.trim_end().to_owned());
+            }
         }
-        out.trim_end().to_owned()
+        rows
+    }
+
+    /// Inline math three rows tall: one row above and one below the baseline row.
+    fn tall_math() -> MathEntry {
+        MathEntry {
+            display: false,
+            tex: "x".into(),
+            metrics: crate::math::MathMetrics {
+                width: 3.0,
+                height: 6.0,
+                depth: 2.0,
+            },
+        }
     }
 
     fn math(display: bool) -> MathEntry {
@@ -827,20 +968,17 @@ mod tests {
     #[test]
     fn wraps_words_and_cjk() {
         let doc = layout("hello world foo\n\nあいうえお", &[], ctx(11));
-        let lines: Vec<_> = doc.lines.iter().map(text_of).collect();
-        assert_eq!(lines, ["hello world", "foo", "", "あいうえお"]);
+        assert_eq!(screen(&doc), ["hello world", "foo", "", "あいうえお"]);
         let doc = layout("あいうえおか", &[], ctx(7));
-        let lines: Vec<_> = doc.lines.iter().map(text_of).collect();
-        assert_eq!(lines, ["あいう", "えおか"]);
+        assert_eq!(screen(&doc), ["あいう", "えおか"]);
     }
 
     #[test]
     fn lists_quotes_and_code_blocks() {
         let md = "- one\n- two\n  1. nested\n\n> quoted\n\n```rust\nfn main() {}\n```\n";
         let doc = layout(md, &[], ctx(30));
-        let lines: Vec<_> = doc.lines.iter().map(text_of).collect();
         assert_eq!(
-            lines,
+            screen(&doc),
             [
                 "• one",
                 "• two",
@@ -861,26 +999,56 @@ mod tests {
     #[test]
     fn code_tabs_are_shown_as_spaces_but_copied_verbatim() {
         let doc = layout("```\n\tx\n```\n", &[], ctx(20));
-        assert_eq!(text_of(&doc.lines[1]), "│     x            │");
+        assert_eq!(screen(&doc)[1], "│     x            │");
         assert_eq!(doc.snippets[0].text, "\tx\n");
     }
 
     #[test]
     fn math_becomes_images_and_snippets() {
         let doc = layout("Let $x$ be.\n\n$$y$$", &[math(false), math(true)], ctx(40));
-        let lines: Vec<_> = doc.lines.iter().map(text_of).collect();
-        assert_eq!(lines[0], "Let MMMMM be.");
-        assert!(lines[2].contains("MMMMM") && lines[2].ends_with("[2]"));
+        let rows = screen(&doc);
+        assert_eq!(rows[0], "Let MMMMM be.");
+        assert!(rows[2].contains("MMMMM") && rows[2].ends_with("[2]"));
         assert_eq!(doc.snippets.len(), 2);
         assert!(matches!(doc.snippets[0].kind, SnippetKind::InlineMath));
         assert_eq!(doc.lines[0].snippets, [0]);
     }
 
     #[test]
-    fn tables_fit_width() {
+    fn table_cells_wrap_to_fit() {
         let md = "| a | long header |\n|---|---|\n| 1 | value |\n";
         let doc = layout(md, &[], ctx(12));
-        let lines: Vec<_> = doc.lines.iter().map(text_of).collect();
-        assert_eq!(lines, ["a │ long he…", "──┼─────────", "1 │ value"]);
+        assert_eq!(
+            screen(&doc),
+            ["a │ long", "  │ header", "──┼─────────", "1 │ value"]
+        );
+    }
+
+    #[test]
+    fn wrapped_cell_lines_follow_each_other_beside_tall_math() {
+        // The second line of the left cell sits right below its first line, not below the
+        // bottom of the taller math in the right cell.
+        let md = "| long text here | $x$ |\n|---|---|\n";
+        let doc = layout(md, &[tall_math()], ctx(15));
+        assert_eq!(
+            screen(&doc)[..3],
+            ["          │ MMM", "long text │ MMM", "here      │ MMM"]
+        );
+    }
+
+    #[test]
+    fn rows_added_by_tall_math_keep_quote_bars_and_separators() {
+        let doc = layout("> | a | $x$ |\n> |---|---|\n", &[tall_math()], ctx(40));
+        assert_eq!(doc.lines[0].height, 3);
+        assert_eq!(screen(&doc)[..3], ["│   │ MMM", "│ a │ MMM", "│   │ MMM"]);
+    }
+
+    #[test]
+    fn table_cells_hold_math() {
+        let md = "| case | value |\n|---|---|\n| $x$ | one |\n";
+        let doc = layout(md, &[math(false)], ctx(40));
+        assert_eq!(screen(&doc)[2], "MMMMM │ one");
+        assert!(matches!(doc.snippets[0].kind, SnippetKind::InlineMath));
+        assert_eq!(doc.lines[2].snippets, [0]);
     }
 }

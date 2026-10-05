@@ -245,6 +245,7 @@ s:sessions  J/K:post  j/k:scroll  Tab:snippet  y:copy  Y:copy post  f:follow/loc
 - Code blocks: drawn in a rounded box with the language and snippet number on the top edge, with syntax highlighting based on the language tag
 - Display math: the SVG is rasterized and shown centered as an image
 - Inline math: the SVG is rasterized and embedded in the text as an image. The TUI wraps text itself, reserving cells for the image width. Images sit on the text baseline; a line grows by the rows an image needs above or below the baseline
+- Tables: cells hold the same inline content as paragraphs, including math images. Columns are as wide as their widest cell; a table too wide for the pane narrows its widest columns and wraps their cells
 - Rasterized images are cached per cell size and post
 - The background color is queried from the terminal with OSC 11 at startup and decides the image background and the math color (light on dark backgrounds)
 
@@ -311,4 +312,3 @@ The `md-stack` binary is expected to be on `PATH`.
 
 - Drawing performance of the right pane for very long posts
 - TUI colors and themes
-- Math inside table cells is shown as `$...$` text, not as images
