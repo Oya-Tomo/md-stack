@@ -3,7 +3,7 @@
 Render the code blocks and KaTeX-syntax math that Claude Code writes in a TUI running in a separate terminal, and copy them with a single key.
 See [docs/SPEC.md](docs/SPEC.md) for the specification.
 
-![md-stack showing a post with Maxwell's equations and C++ code](assets/snapshot.png)
+https://github.com/user-attachments/assets/c102d69f-7f83-4868-86b4-5fa955818220
 
 ## Requirements
 
