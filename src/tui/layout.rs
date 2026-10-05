@@ -390,35 +390,41 @@ impl Builder {
         self.ctx.width.saturating_sub(to_cols(indent)).max(1)
     }
 
+    /// Draws a code block in a rounded box with its language and block number on the top edge.
     fn code_block(&mut self, CodeBlock { lang, text: code }: CodeBlock) {
-        let width = self.content_width();
+        // Border plus one column of padding on each side.
+        const FRAME: u16 = 4;
+        let width = self.content_width().max(FRAME + 1);
+        let inner = width - FRAME;
         let block = self.doc.blocks.len();
-        let label = format!(" [{}]", block + 1);
         let title = if lang.is_empty() {
             String::new()
         } else {
             format!(" {lang} ")
         };
+        let label = format!(" [{}] ", block + 1);
 
-        let mut header = LineBuilder::with_block(block);
-        let fill = usize::from(width).saturating_sub(2 + title.width() + label.width());
-        header.push_text(&format!("──{title}{}{label}", "─".repeat(fill)), DIM);
-        self.push_line(header);
+        let mut top = LineBuilder::with_block(block);
+        let fill = usize::from(width - FRAME).saturating_sub(title.width() + label.width());
+        top.push_text(&format!("╭─{title}{}{label}─╮", "─".repeat(fill)), DIM);
+        self.push_line(top);
 
         for spans in highlight::highlight(&code, &lang, self.ctx.theme) {
-            for chunk in wrap_spans(spans, width.saturating_sub(2).max(1)) {
+            for chunk in wrap_spans(spans, inner) {
                 let mut line = LineBuilder::with_block(block);
                 line.push_text("│ ", DIM);
                 for span in chunk {
                     line.push_span(span);
                 }
+                line.advance_to(width - 2);
+                line.push_text(" │", DIM);
                 self.push_line(line);
             }
         }
 
-        let mut footer = LineBuilder::with_block(block);
-        footer.push_text(&"─".repeat(usize::from(width)), DIM);
-        self.push_line(footer);
+        let mut bottom = LineBuilder::with_block(block);
+        bottom.push_text(&format!("╰{}╯", "─".repeat(usize::from(width - 2))), DIM);
+        self.push_line(bottom);
 
         self.doc.blocks.push(Block {
             kind: BlockKind::Code { lang },
@@ -840,9 +846,9 @@ mod tests {
                 "",
                 "│ quoted",
                 "",
-                "── rust ────────────────── [1]",
-                "│ fn main() {}",
-                "──────────────────────────────",
+                "╭─ rust ─────────────── [1] ─╮",
+                "│ fn main() {}               │",
+                "╰────────────────────────────╯",
             ]
         );
         assert_eq!(doc.blocks.len(), 1);

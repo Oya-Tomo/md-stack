@@ -226,9 +226,9 @@ At startup the TUI queries the terminal for the cell size in pixels, which is us
                          │
                          │        [x = (-b ± √(b²-4ac)) / 2a]        [2]
                          │
-                         │  ── rust ──────────────────────────────── [3]
-                         │  │ fn main() { ... }
-                         │  ──────────────────────────────────────────
+                         │  ╭─ rust ───────────────────────────── [3] ─╮
+                         │  │ fn main() { ... }                        │
+                         │  ╰──────────────────────────────────────────╯
 s:sessions  J/K:post  j/k:scroll  Tab:block  y:copy  Y:copy post  f:follow  q:quit
 ```
 
@@ -241,7 +241,7 @@ s:sessions  J/K:post  j/k:scroll  Tab:block  y:copy  Y:copy post  f:follow  q:qu
 ### 6.4 Rendering
 
 - Markdown: headings, emphasis, lists, block quotes, tables, links, rules, code blocks and math
-- Code blocks: syntax highlighting based on the language tag
+- Code blocks: drawn in a rounded box with the language and block number on the top edge, with syntax highlighting based on the language tag
 - Display math: the SVG is rasterized and shown centered as a Sixel image
 - Inline math: the SVG is rasterized and embedded in the text as an image. The TUI wraps text itself, reserving cells for the image width. Images sit on the text baseline; a line grows by the rows an image needs above or below the baseline
 - Rasterized images are cached per cell size and post
