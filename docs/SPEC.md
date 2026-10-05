@@ -1,73 +1,73 @@
-# md-stack 仕様書
+# md-stack Specification
 
-## 1. 概要
+## 1. Overview
 
-Claude Code はターミナル上で数式をレンダリングできず、コードブロックも綺麗にコピーできない。
-md-stack は Claude Code にコードブロックや KaTeX 記法の数式を含む出力を MCP 経由で投稿させ、
-別ターミナルで動く TUI ビューアでそれをレンダリング表示・コピーできるようにするツールである。
+Claude Code cannot render math in the terminal, and its code blocks are awkward to copy.
+md-stack lets Claude Code post output containing code blocks and KaTeX-syntax math over MCP,
+and shows it in a TUI viewer running in a separate terminal, where it is rendered and can be copied.
 
-### 1.1 目的
+### 1.1 Goals
 
-- Claude Code の出力中の数式（KaTeX 記法）を、ターミナル上で正しくレンダリングして読めるようにする
-- コードブロック・数式ソースをワンキーでクリップボードにコピーできるようにする
-- Claude Code の会話（セッション）単位で投稿を管理し、`/clear`・`--resume` と自然に連動させる
+- Render math (KaTeX syntax) in Claude Code's output correctly in the terminal
+- Copy a code block or a math source to the clipboard with a single key
+- Organize posts per Claude Code conversation (session), following `/clear` and `--resume` naturally
 
-### 1.2 対象外
+### 1.2 Non-goals
 
-- Sixel 非対応端末のサポート（画像表示できない環境向けのフォールバック表示は持たない）
-- Linux 以外の OS（プロセス情報の取得に `/proc` を用いるため。将来の拡張余地として残す）
-- 投稿の編集・追記（`update` ツール等）。必要になった時点で追加を検討する
+- Terminals without Sixel support (there is no fallback display for terminals that cannot show images)
+- Operating systems other than Linux (process information is read from `/proc`; left open for later)
+- Editing or appending to posts (e.g. an `update` tool); to be considered when needed
 
-## 2. 全体構成
+## 2. Architecture
 
-Rust 製の単一バイナリ `md-stack` が、3 つのサブコマンドで別々のプロセスとして動作する。
+A single Rust binary, `md-stack`, runs as separate processes through three subcommands.
 
-| サブコマンド | 起動者 | 役割 |
+| Subcommand | Started by | Role |
 |---|---|---|
-| `md-stack mcp` | Claude Code（stdio MCP サーバー） | 投稿の受付、数式の SVG 化、ストアへの保存 |
-| `md-stack hook` | Claude Code（`SessionStart` フック） | Claude Code プロセスと現在の会話の対応をストアに記録 |
-| `md-stack tui` | ユーザー（別ターミナル） | セッション選択、投稿のレンダリング表示、コピー |
+| `md-stack mcp` | Claude Code (stdio MCP server) | Accepts posts, renders math to SVG, writes to the store |
+| `md-stack hook` | Claude Code (`SessionStart` hook) | Records which conversation each Claude Code process currently shows |
+| `md-stack tui` | The user (separate terminal) | Session selection, rendering posts, copying |
 
-プロセス間通信はファイルベースのストア（§3）のみで行う。
-各プロセスは起動順序に依存せず、TUI を後から起動しても過去の投稿を閲覧できる。
+The processes communicate only through a file-based store (§3).
+None of them depends on start order, and a TUI started later still shows earlier posts.
 
 ```
  Claude Code (pid P) ──stdio──> md-stack mcp ──write──┐
         │                                              ▼
-        └──SessionStart──> md-stack hook ──write──> ストア ──watch──> md-stack tui
+        └──SessionStart──> md-stack hook ──write──> store ──watch──> md-stack tui
 ```
 
-### 2.1 設計の根拠（検証結果: Claude Code 2.1.284）
+### 2.1 Design rationale (observed with Claude Code 2.1.284)
 
-| 事象 | 結果 |
+| Event | Observation |
 |---|---|
-| `/clear` | セッション ID は変わる。MCP サーバープロセスは再起動されず継続する |
-| `/clear` 後の MCP サーバーの環境変数 `CLAUDE_CODE_SESSION_ID` | 古い ID のまま（現在の会話の特定には使えない） |
-| ツール呼び出しの `_meta` | `claudecode/toolUseId`・`progressToken` のみ。セッション ID は含まれない |
-| `--resume` | MCP サーバーは新規起動される |
-| MCP サーバーの親プロセス | Claude Code 本体（直接の親） |
-| フックの環境変数 `CLAUDE_PID` | Claude Code 本体の pid |
-| `SessionStart` の `source` | `startup` / `clear` / `resume` のいずれでも発火する |
-| Claude Code 終了時 | MCP サーバーに SIGTERM が届く |
+| `/clear` | The session ID changes. The MCP server process is not restarted and keeps running |
+| `CLAUDE_CODE_SESSION_ID` in the MCP server's environment after `/clear` | Still the old ID (unusable for identifying the current conversation) |
+| `_meta` of tool calls | Only `claudecode/toolUseId` and `progressToken`; no session ID |
+| `--resume` | A new MCP server process is started |
+| Parent process of the MCP server | Claude Code itself (direct parent) |
+| `CLAUDE_PID` in the hook's environment | The pid of Claude Code itself |
+| `source` of `SessionStart` | Fires for each of `startup` / `clear` / `resume` |
+| Claude Code exits | The MCP server receives SIGTERM |
 
-MCP サーバー単体では `/clear` 後の現在の会話を知る手段がない。
-そのため「Claude Code プロセス → 現在の会話」の対応はフックが記録し、MCP サーバーは自身の親 pid でそれを引く。
+The MCP server alone cannot tell which conversation is current after `/clear`.
+The hook therefore records the mapping "Claude Code process → current conversation", and the MCP server looks it up by its parent pid.
 
-## 3. ストア
+## 3. Store
 
-ルートは `$XDG_STATE_HOME/md-stack/`（未設定時は `~/.local/state/md-stack/`）。
+The root is `$XDG_STATE_HOME/md-stack/` (`~/.local/state/md-stack/` when unset).
 
 ```
 md-stack/
 ├── processes/
-│   └── <claude_pid>.json        # 起動中の Claude Code 1 プロセスにつき 1 ファイル
+│   └── <claude_pid>.json        # one file per running Claude Code process
 └── sessions/
-    └── <session_id>/            # Claude Code の会話 1 つにつき 1 ディレクトリ
+    └── <session_id>/            # one directory per Claude Code conversation
         ├── session.json
-        ├── 0001.md              # 投稿本文（Claude が投稿した Markdown そのまま）
-        ├── 0001.json            # 投稿メタデータ
+        ├── 0001.md              # post body (the Markdown Claude posted, verbatim)
+        ├── 0001.json            # post metadata
         └── 0001/
-            ├── 0.svg            # 数式ごとの SVG（本文中の出現順、0 始まり）
+            ├── 0.svg            # one SVG per math expression (document order, 0-based)
             └── 1.svg
 ```
 
@@ -84,7 +84,7 @@ md-stack/
 }
 ```
 
-- `process_start_time` は `/proc/<pid>/stat` の starttime。pid 再利用による取り違えを防ぐため、生存判定は「pid が存在し、かつ starttime が一致する」ことで行う。
+- `process_start_time` is the starttime field of `/proc/<pid>/stat`. To avoid confusion from pid reuse, a process counts as alive only if the pid exists and its starttime matches.
 
 ### 3.2 `sessions/<session_id>/session.json`
 
@@ -97,12 +97,12 @@ md-stack/
 }
 ```
 
-### 3.3 投稿メタデータ `NNNN.json`
+### 3.3 Post metadata `NNNN.json`
 
 ```json
 {
   "id": 1,
-  "title": "二次方程式の解の公式",
+  "title": "The quadratic formula",
   "created_at": "2026-10-05T11:30:00+09:00",
   "math": [
     {
@@ -116,69 +116,69 @@ md-stack/
 }
 ```
 
-- `math` は本文中の出現順で、`math[i]` の SVG が `NNNN/<i>.svg`。TUI は本文の数式ノードを出現順にこの配列と対応づける。
-- `width_ex` / `height_ex` / `depth_ex` は MathJax が出力した寸法（ex 単位）。TUI が画像のセル数を決めるのに使う。
-- 投稿 ID はセッション内で 1 から連番。
+- `math` is in document order, and the SVG of `math[i]` is `NNNN/<i>.svg`. The TUI matches the math nodes of the body to this array in order of appearance.
+- `width_ex` / `height_ex` / `depth_ex` are the dimensions reported by MathJax, in ex. The TUI uses them to size images on the cell grid and to align them to the text baseline.
+- Post IDs are sequential within a session, starting at 1.
 
-### 3.4 書き込み規約
+### 3.4 Write protocol
 
-- すべてのファイルは一時ファイルに書いてから `rename` で配置する（TUI が書きかけを読まないため）。
-- 投稿は `NNNN/`（SVG）→ `NNNN.md` → `NNNN.json` の順に配置し、**`NNNN.json` の出現をもって投稿の完成**とみなす。TUI は `NNNN.json` のみを投稿の存在判定に使う。
-- 投稿 ID の採番は、既存の最大 ID + 1 の `NNNN/` ディレクトリを作成して予約する（作成はアトミックで、既に存在すれば次の ID で再試行する）。
+- Every file is written to a temporary file and then moved into place with `rename`, so the TUI never reads partial contents.
+- A post is placed in the order `NNNN/` (SVGs) → `NNNN.md` → `NNNN.json`; **a post is complete once `NNNN.json` exists**. The TUI only uses `NNNN.json` to detect posts.
+- A post ID is reserved by creating the `NNNN/` directory for the current maximum ID + 1. Creation is atomic; if the directory already exists, the next ID is tried.
 
-### 3.5 削除・掃除
+### 3.5 Cleanup
 
-- **セッション**: `session.json` の `transcript_path` が存在しなくなったら、そのセッションディレクトリを削除する。Claude Code 本体の会話保持期間（`cleanupPeriodDays`）にそのまま追従する。
-- **プロセス**: 生存判定（§3.1）に失敗した `processes/*.json` を削除する。
-- 掃除は `md-stack mcp` と `md-stack tui` の起動時に行う。
-- `/clear` や Claude Code の終了ではログを削除しない（その会話は `/resume` で再開できるため）。
+- **Sessions**: when the `transcript_path` in `session.json` no longer exists, the session directory is deleted. This follows Claude Code's own retention of conversations (`cleanupPeriodDays`).
+- **Processes**: `processes/*.json` entries that fail the liveness check (§3.1) are deleted.
+- Cleanup runs when `md-stack mcp` and `md-stack tui` start.
+- `/clear` and exiting Claude Code do not delete posts, since the conversation can be resumed with `/resume`.
 
 ## 4. `md-stack hook`
 
-`SessionStart` フックとして登録する（matcher なし。`startup` / `clear` / `resume` のすべてで実行）。
+Registered as a `SessionStart` hook without a matcher, so it runs for `startup`, `clear` and `resume`.
 
-1. 標準入力のフック JSON から `session_id`・`cwd`・`transcript_path` を読む
-2. 環境変数 `CLAUDE_PID` から Claude Code の pid を得る
-3. `processes/<CLAUDE_PID>.json` を作成・上書きする
+1. Read `session_id`, `cwd` and `transcript_path` from the hook JSON on stdin
+2. Get the Claude Code pid from the `CLAUDE_PID` environment variable
+3. Create or overwrite `processes/<CLAUDE_PID>.json`
 
-セッションディレクトリと `session.json` は、その会話で最初の投稿があったときに `md-stack mcp` が作成する。
-フック時点ではトランスクリプトがまだ作られていないことがあり、先に作ると掃除（§3.5）の対象になってしまうため。
+The session directory and `session.json` are created by `md-stack mcp` on the conversation's first post.
+At hook time the transcript may not exist yet, and creating the session earlier would make it a target of cleanup (§3.5).
 
-フックは Claude Code の動作を妨げないよう、失敗しても終了コード 0 で終了し、エラーは標準エラーに出す。
+So that it never disturbs Claude Code, the hook exits with status 0 even on failure and reports errors on stderr.
 
 ## 5. `md-stack mcp`
 
-stdio で動く MCP サーバー。
+An MCP server over stdio.
 
-### 5.1 現在の会話の解決
+### 5.1 Resolving the current conversation
 
-ツール呼び出しのたびに、親 pid（= Claude Code 本体）で `processes/<ppid>.json` を引き、その時点の `session_id` を投稿先とする。
-`/clear` 後もプロセスは継続するため、起動時にキャッシュせず毎回引く。
+On every tool call, the server looks up `processes/<ppid>.json` using its parent pid (Claude Code itself) and posts to the `session_id` found there.
+Because the process survives `/clear`, the lookup is not cached at startup.
 
-レコードが無い場合（フック未設定など）は投稿を受け付けず、セットアップ不備を示すエラーを返す。
+If there is no record (e.g. the hook is not installed), the post is refused with an error describing the setup problem.
 
-### 5.2 ツール `post`
+### 5.2 Tool `post`
 
-| 引数 | 型 | 必須 | 説明 |
+| Parameter | Type | Required | Description |
 |---|---|---|---|
-| `markdown` | string | ✓ | 投稿本文。CommonMark + GFM + 数式（`$...$` / `$$...$$`） |
-| `title` | string | | 一覧表示用のタイトル。省略時は本文の最初の見出しまたは先頭行から生成 |
+| `markdown` | string | ✓ | Post body: CommonMark + GFM + math (`$...$` / `$$...$$`) |
+| `title` | string | | Title for the post list. Defaults to the first heading or the first line of the body |
 
-処理:
+Processing:
 
-1. 現在の会話を解決する（§5.1）
-2. Markdown をパースし、全数式（インライン・ディスプレイ）を抽出する
-3. 全数式を SVG にレンダリングする（§7）
-4. **1 つでも失敗したら、何も保存せず**エラーを返す
-5. 全数式が成功したら、ストアに保存し（§3.4）、投稿 ID を返す
+1. Resolve the current conversation (§5.1)
+2. Parse the Markdown and extract all math (inline and display)
+3. Render every expression to SVG (§7)
+4. **If any expression fails, save nothing** and return an error
+5. If all succeed, save the post (§3.4) and return its ID
 
-成功時の結果:
+Result on success:
 
 ```
 Posted as md-stack #3.
 ```
 
-失敗時の結果（`isError: true`）:
+Result on failure (`isError: true`):
 
 ```
 Post rejected: 2 math expression(s) failed to render. Nothing was saved; fix and post again.
@@ -192,116 +192,120 @@ Post rejected: 2 math expression(s) failed to render. Nothing was saved; fix and
     error:  Undefined control sequence \foo
 ```
 
-### 5.3 サーバー instructions
+### 5.3 Server instructions
 
-MCP の `instructions` で、Claude に次の運用を指示する。
+The MCP `instructions` tell Claude to:
 
-- コードブロックまたは数式を含む回答は、説明文も含めて回答全体を `post` で投稿する
-- ターミナルには本文を書かず、`→ md-stack #N` のように投稿 ID と短い要約のみを書く
-- `post` がエラーを返したら、指摘された数式を修正して投稿し直す
+- Post the whole response, including the explanation, with `post` whenever it contains a code block or math
+- Write only the post ID and a short summary in the terminal, such as `→ md-stack #N`
+- Fix the reported expressions and post again when `post` returns an error
 
 ## 6. `md-stack tui`
 
-### 6.1 動作要件
+### 6.1 Requirements
 
-- Sixel 対応端末（例: WezTerm）
-- OSC 52 によるクリップボード書き込みが有効な端末
+- A terminal with Sixel support (e.g. WezTerm)
+- A terminal that allows clipboard writes through OSC 52
 
-起動時に端末へセルのピクセルサイズを問い合わせ、数式画像のスケーリングに用いる。
+At startup the TUI queries the terminal for the cell size in pixels, which is used to scale math images.
 
-### 6.2 セッション選択
+### 6.2 Session selection
 
-- 選択対象は **起動中の Claude Code プロセス**（`processes/` のうち生存しているもの）。表示項目は cwd・セッション開始時刻・投稿数。
-- 起動時に選択画面を出す。起動中のプロセスが 1 つだけなら自動で選択する。
-- 閲覧中もキー操作で選択画面を開き、切り替えられる。
-- 選択したプロセスの `processes/<pid>.json` を監視し、`/clear` や `--resume` で `session_id` が変われば、自動で新しい会話の表示に切り替える。
+- The choices are **running Claude Code processes** (live entries in `processes/`), shown with cwd, pid, time and post count.
+- The selection screen appears at startup. If exactly one process is running, it is selected automatically.
+- The selection screen can be reopened with a key while viewing.
+- The TUI watches the selected process's `processes/<pid>.json`; when `/clear` or `--resume` changes its `session_id`, it switches to the new conversation automatically.
 
-### 6.3 画面構成
+### 6.3 Layout
 
 ```
-┌ md-stack ─ ~/project (pid 712352) ──────────────────────────┐
-│ #1 二次方程式の解の公式 │ # 二次方程式の解の公式           │
-│ #2 Rust の所有権        │                                 │
-│▶#3 行列の対角化         │ 係数 a≠0 のとき                 │
-│                         │      -b ± √(b²-4ac)             │
-│                         │  x = ──────────────  [数式画像] │
-│                         │           2a                    │
-│                         │ ┌ rust ─────────────── [2] ─┐  │
-│                         │ │ fn main() { ... }          │  │
-│                         │ └────────────────────────────┘  │
-├─────────────────────────┴─────────────────────────────────┤
-│ s:セッション  Tab:ブロック選択  y:コピー  Y:全文コピー  q:終了 │
-└──────────────────────────────────────────────────────────────┘
+ md-stack ~/project pid 712352 [follow]
+#1 The quadratic formula │  The quadratic formula
+#2 Ownership in Rust     │
+#3 Diagonalization       │  For [a≠0], the roots are
+                         │
+                         │        [x = (-b ± √(b²-4ac)) / 2a]        [2]
+                         │
+                         │  ── rust ──────────────────────────────── [3]
+                         │  │ fn main() { ... }
+                         │  ──────────────────────────────────────────
+s:sessions  J/K:post  j/k:scroll  Tab:block  y:copy  Y:copy post  f:follow  q:quit
 ```
 
-- 左ペイン: 投稿一覧（ID・タイトル）
-- 右ペイン: 選択中の投稿のレンダリング結果
-- フォローモード（既定で有効）: 新しい投稿が来たら自動でその投稿を表示する。手動で別の投稿を選ぶと解除される。
+(`[...]` marks math drawn as images.)
 
-### 6.4 レンダリング
+- Left pane: post list (ID and title)
+- Right pane: the selected post, rendered
+- Follow mode (on by default): a new post is shown automatically. Selecting another post by hand turns it off.
 
-- Markdown: 見出し・強調・リスト・引用・表・リンク・水平線・コードブロック・数式
-- コードブロック: 言語指定に基づくシンタックスハイライト
-- ディスプレイ数式: SVG をラスタライズし、中央寄せのブロック画像として Sixel 表示する
-- インライン数式: SVG をラスタライズし、文中に画像として埋め込む。本文の折り返しは TUI が自前で計算し、数式画像の幅に応じたセル幅を確保する。画像の高さが 1 行を超える場合、その表示行は必要な行数ぶん高くなる
-- ラスタライズ結果はセルサイズ・投稿単位でキャッシュする
-- 背景色は起動時に OSC 11 で端末に問い合わせ、数式画像の背景と文字色（暗い背景なら明るい色）を決める
-- Sixel の描き残しを防ぐため、スクロールや投稿の切り替えで画像の位置が変わるときは画面全体を再描画する
+### 6.4 Rendering
 
-### 6.5 コピー対象（ブロック）
+- Markdown: headings, emphasis, lists, block quotes, tables, links, rules, code blocks and math
+- Code blocks: syntax highlighting based on the language tag
+- Display math: the SVG is rasterized and shown centered as a Sixel image
+- Inline math: the SVG is rasterized and embedded in the text as an image. The TUI wraps text itself, reserving cells for the image width. Images sit on the text baseline; a line grows by the rows an image needs above or below the baseline
+- Rasterized images are cached per cell size and post
+- The background color is queried from the terminal with OSC 11 at startup and decides the image background and the math color (light on dark backgrounds)
+- To avoid stale Sixel images, the whole screen is redrawn whenever scrolling or switching posts moves images
 
-コードブロック・ディスプレイ数式・インライン数式をコピー可能なブロックとし、本文中の出現順に番号を振る。
-数式のコピー内容は TeX ソース（区切り記号 `$` を含まない）。
+### 6.5 Copyable blocks
 
-### 6.6 キー操作
+Code blocks, display math and inline math are copyable blocks, numbered in document order.
+Copying math yields its TeX source (without the `$` delimiters).
 
-| キー | 動作 |
+### 6.6 Key bindings
+
+| Key | Action |
 |---|---|
-| `j` / `k`, `↓` / `↑` | 右ペインのスクロール |
-| `J` / `K`, `]` / `[` | 次 / 前の投稿 |
-| `Tab` / `Shift+Tab` | 次 / 前のブロックにフォーカス |
-| `y` | フォーカス中のブロックをコピー |
-| `Y` | 投稿全体の Markdown をコピー |
-| `f` | フォローモードの切り替え |
-| `s` | セッション選択画面を開く |
-| `q` | 終了 |
+| `j` / `k`, `↓` / `↑` | Scroll the right pane |
+| `Ctrl+d` / `Ctrl+u` | Scroll half a page |
+| `g` / `G` | Scroll to the top / bottom |
+| `J` / `K`, `]` / `[` | Next / previous post |
+| `Tab` / `Shift+Tab` | Focus the next / previous block |
+| `y` | Copy the focused block |
+| `Y` | Copy the whole post as Markdown |
+| `f` | Toggle follow mode |
+| `s` | Open the session selection screen |
+| `q` | Quit |
 
-コピーは OSC 52 で行う。
+Copying uses OSC 52.
 
-## 7. 数式レンダリング
+## 7. Math rendering
 
-- 方式: 組み込み JS エンジン上で MathJax を実行し、TeX から SVG を直接生成する
-- 選定理由: KaTeX 本体は HTML/MathML しか出力できず SVG を単体生成できない。MathJax は KaTeX 記法をほぼそのまま受理でき、SVG を直接出力できる
-- レンダリングは投稿時に MCP サーバーで 1 回だけ行う。TUI は SVG のラスタライズのみ行う
-- MathJax のエラー（未定義コマンド、括弧不整合など）は §5.2 の形式で Claude に返す
-- 生成する SVG はフォントのグリフをパスとして埋め込んだ自己完結形式とし、ラスタライズ時に外部フォントに依存しない
+- Method: MathJax runs in an embedded JS engine and converts TeX directly to SVG
+- Rationale: KaTeX itself only outputs HTML/MathML and cannot produce SVG on its own. MathJax accepts KaTeX syntax nearly as is and outputs SVG directly
+- Rendering happens once per post, in the MCP server. The TUI only rasterizes SVG
+- MathJax errors (undefined commands, unbalanced braces, ...) are returned to Claude in the format of §5.2
+- Packages that hide errors (`noerrors`, `noundefined`) or load asynchronously (`autoload`, `require`) are disabled, so every failure surfaces as an error
+- Macros defined with `\newcommand` are shared within a post, not across posts
+- MathJax draws the glyphs of its own fonts as paths. Characters outside them (e.g. CJK text in `\text{}`) are emitted as `<text>` and rasterized with system fonts
 
-## 8. Claude Code への組み込み
+## 8. Claude Code integration
 
-MCP サーバー登録と `SessionStart` フックを、1 つの Claude Code プラグインとして配布する。
+The MCP server registration and the `SessionStart` hook are distributed as one Claude Code plugin.
 
 - `mcpServers`: `md-stack mcp`
 - `hooks.SessionStart`: `md-stack hook`
 
-プラグインは `plugin/` に、それを配布するマーケットプレイス定義はリポジトリ直下の `.claude-plugin/marketplace.json` に置く。
-`md-stack` バイナリは `PATH` 上にあるものとする。
+The plugin lives in `plugin/`, and the marketplace definition that distributes it is `.claude-plugin/marketplace.json` at the repository root.
+The `md-stack` binary is expected to be on `PATH`.
 
-## 9. 使用ライブラリ
+## 9. Libraries
 
-| 用途 | ライブラリ |
+| Purpose | Library |
 |---|---|
 | TUI | `ratatui`, `crossterm` |
-| Sixel 画像表示 | `ratatui-image` |
-| MCP | `rmcp`（公式 Rust SDK） |
-| Markdown パース | `pulldown-cmark`（数式拡張あり） |
-| シンタックスハイライト | `syntect`（純 Rust の正規表現エンジン `fancy-regex` を使用） |
-| JS エンジン（MathJax 実行） | `rquickjs`（QuickJS） |
-| MathJax | `mathjax-full` 3.2.2 を `esbuild` で 1 ファイルにまとめ、`assets/mathjax.js` としてバイナリに埋め込む |
-| SVG ラスタライズ | `resvg` |
-| ファイル監視 | `notify` |
+| Sixel images | `ratatui-image` |
+| MCP | `rmcp` (official Rust SDK) |
+| Markdown parsing | `pulldown-cmark` (with the math extension) |
+| Syntax highlighting | `syntect` (with the pure-Rust regex engine `fancy-regex`) |
+| JS engine (runs MathJax) | `rquickjs` (QuickJS) |
+| MathJax | `mathjax-full` 3.2.2, bundled into one file with `esbuild` and embedded in the binary as `assets/mathjax.js` |
+| SVG rasterization | `resvg` |
+| File watching | `notify` |
 
-## 10. 未決事項
+## 10. Open issues
 
-- 投稿が長大な場合の右ペイン内の描画性能（Sixel 画像のスクロール時の再描画方式）
-- TUI の配色・テーマ
-- 表のセル内の数式は画像化せず `$...$` のテキストで表示している
+- Drawing performance of the right pane for very long posts (how Sixel images are redrawn while scrolling)
+- TUI colors and themes
+- Math inside table cells is shown as `$...$` text, not as images

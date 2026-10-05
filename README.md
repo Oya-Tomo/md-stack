@@ -1,45 +1,45 @@
 # md-stack
 
-Claude Code が書くコードブロックや KaTeX 記法の数式を、別ターミナルの TUI でレンダリング表示・コピーするためのツール。
-仕様は [docs/SPEC.md](docs/SPEC.md) を参照。
+Render the code blocks and KaTeX-syntax math that Claude Code writes in a TUI running in a separate terminal, and copy them with a single key.
+See [docs/SPEC.md](docs/SPEC.md) for the specification.
 
-## 必要なもの
+## Requirements
 
-- Rust（edition 2024）
-- Node.js と npm（MathJax のバンドルを作るときのみ）
-- Sixel と OSC 52 に対応した端末（例: WezTerm）
+- Rust (edition 2024)
+- Node.js and npm (only to rebuild the MathJax bundle)
+- A terminal with Sixel and OSC 52 support (e.g. WezTerm)
 - Linux
 
-## ビルドとインストール
+## Build and install
 
 ```sh
-# MathJax を assets/mathjax.js にバンドルする（バイナリに埋め込まれる）
-(cd mathjax && npm ci && npm run build)
-
-# md-stack を PATH に入れる
+# Install md-stack on your PATH
 cargo install --path .
 
-# Claude Code にプラグイン（MCP サーバー + SessionStart フック）を入れる
+# Install the Claude Code plugin (MCP server + SessionStart hook)
 claude plugin marketplace add "$PWD"
 claude plugin install md-stack@md-stack
 ```
 
-プラグインは Claude Code の次回起動から有効になる。
+The plugin takes effect the next time Claude Code starts.
 
-## 使い方
+The MathJax bundle `assets/mathjax.js` is checked in and embedded in the binary.
+To rebuild it, run `(cd mathjax && npm ci && npm run build)`.
 
-1. 別ターミナルで `md-stack tui` を起動する
-2. Claude Code を起動すると、コードや数式を含む回答が md-stack に投稿される
-3. TUI で起動中の Claude Code セッションを選ぶ（1 つだけなら自動で選ばれる）
+## Usage
 
-| キー | 動作 |
+1. Run `md-stack tui` in a separate terminal
+2. Start Claude Code; responses containing code or math are posted to md-stack
+3. Select the running Claude Code session in the TUI (selected automatically if there is only one)
+
+| Key | Action |
 |---|---|
-| `j` / `k`, `Ctrl+d` / `Ctrl+u`, `g` / `G` | スクロール |
-| `J` / `K`, `]` / `[` | 次 / 前の投稿 |
-| `Tab` / `Shift+Tab` | コードブロック・数式を選択 |
-| `y` / `Y` | 選択中のブロック / 投稿全体をコピー |
-| `f` | 新しい投稿への自動追従を切り替え |
-| `s` | セッション選択画面 |
-| `q` | 終了 |
+| `j` / `k`, `Ctrl+d` / `Ctrl+u`, `g` / `G` | Scroll |
+| `J` / `K`, `]` / `[` | Next / previous post |
+| `Tab` / `Shift+Tab` | Select a code block or math expression |
+| `y` / `Y` | Copy the selected block / the whole post |
+| `f` | Toggle following new posts |
+| `s` | Session selection screen |
+| `q` | Quit |
 
-投稿は `$XDG_STATE_HOME/md-stack/` に保存され、Claude Code が会話の記録を消すと一緒に消える。
+Posts are stored in `$XDG_STATE_HOME/md-stack/` and are removed when Claude Code deletes the conversation's transcript.
